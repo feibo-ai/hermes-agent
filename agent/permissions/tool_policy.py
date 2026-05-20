@@ -25,6 +25,9 @@ _BUILTIN_TOOL_CAPABILITIES: dict[str, str] = {
     "process": "tool.use.shell",
     "execute_code": "tool.use.shell",
     "computer_use": "tool.use.shell",
+    # autonomous scheduling: a member must not be able to schedule a job that
+    # later runs with the agent's full tool set (privilege escalation).
+    "cronjob": "tool.use.shell",
     # filesystem access (read + write)
     "write_file": "tool.use.filesystem",
     "patch": "tool.use.filesystem",

@@ -22,6 +22,11 @@ def test_code_execution_and_desktop_require_shell_capability():
     assert required_capability_for_tool("computer_use") == "tool.use.shell"
 
 
+def test_cron_scheduling_is_elevated():
+    # scheduling autonomous jobs must not be available to members
+    assert required_capability_for_tool("cronjob") == "tool.use.shell"
+
+
 def test_filesystem_tools_require_filesystem_capability():
     for t in ("write_file", "patch", "read_file", "search_files"):
         assert required_capability_for_tool(t) == "tool.use.filesystem", t
