@@ -994,6 +994,41 @@ def _skill_should_show(
     return True
 
 
+def _skills_prompt_perm_key():
+    """Cache discriminator so different identities get distinct skill indexes
+    when enforcement is on. Empty string (shared cache) when disabled."""
+    try:
+        from agent.permissions import get_current_identity, get_engine
+        eng = get_engine()
+        if not eng.policy.enabled:
+            return ""
+        ident = get_current_identity()
+        return (ident.id, eng.can(ident, "skill.approve", audit=False))
+    except Exception:
+        return ""
+
+
+def _filter_skills_by_governance(skills_by_category: dict) -> dict:
+    """Drop pending/disabled skills for non-approver identities (Phase 3).
+    No-op when enforcement is disabled or the identity is an approver."""
+    try:
+        from agent.permissions import filter_usable_skills
+        all_names = [n for items in skills_by_category.values() for (n, _d) in items]
+        if not all_names:
+            return skills_by_category
+        allowed = set(filter_usable_skills(all_names))
+        if len(allowed) == len(set(all_names)):
+            return skills_by_category  # nothing filtered (disabled / approver)
+        filtered = {}
+        for cat, items in skills_by_category.items():
+            kept = [(n, d) for (n, d) in items if n in allowed]
+            if kept:
+                filtered[cat] = kept
+        return filtered
+    except Exception:
+        return skills_by_category
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -1035,6 +1070,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        _skills_prompt_perm_key(),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1167,6 +1203,10 @@ def build_skills_system_prompt(
                 category_descriptions.setdefault(cat, str(cat_desc).strip().strip("'\""))
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
+
+    # Permission/governance (Phase 3): members see only usable (approved)
+    # skills in their prompt; approvers see all. No-op when enforcement is off.
+    skills_by_category = _filter_skills_by_governance(skills_by_category)
 
     if not skills_by_category:
         result = ""

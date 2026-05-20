@@ -672,6 +672,37 @@ def _load_category_description(category_dir: Path) -> Optional[str]:
         return None
 
 
+def _filter_skills_by_governance(skills: list) -> list:
+    """Keep only skills the active identity may see/use (Phase 3).
+    No-op when enforcement is disabled or the identity is an approver."""
+    try:
+        from agent.permissions import filter_usable_skills
+        names = [s.get("name") for s in skills if s.get("name")]
+        allowed = set(filter_usable_skills(names))
+        if len(allowed) == len(set(names)):
+            return skills
+        return [s for s in skills if s.get("name") in allowed]
+    except Exception:
+        return skills
+
+
+def _skill_view_governance_block(name: str):
+    """Return an error JSON string if the identity may not view this skill
+    (pending review / disabled), else None. Plugin (qualified) names skip."""
+    try:
+        from agent.permissions import filter_usable_skills
+        base = name.split(":")[-1].split("/")[-1] if name else name
+        if base and base not in filter_usable_skills([base]):
+            return json.dumps({
+                "success": False,
+                "error": (f"Skill '{name}' is pending review or disabled and "
+                          "is not available to your role. Ask an admin to approve it."),
+            }, ensure_ascii=False)
+    except Exception:
+        return None
+    return None
+
+
 def skills_list(category: str = None, task_id: str = None) -> str:
     """
     List all available skills (progressive disclosure tier 1 - minimal metadata).
@@ -719,6 +750,10 @@ def skills_list(category: str = None, task_id: str = None) -> str:
 
         # Sort by category then name
         all_skills = _sort_skills(all_skills)
+
+        # Permission/governance (Phase 3): members only see usable (approved)
+        # skills; approvers see all. No-op when enforcement is disabled.
+        all_skills = _filter_skills_by_governance(all_skills)
 
         # Extract unique categories
         categories = sorted(
@@ -869,6 +904,12 @@ def skill_view(
         JSON string with skill content or error message
     """
     try:
+        # Permission/governance (Phase 3): block view of pending/disabled
+        # skills for non-approver identities. No-op when enforcement is off.
+        _gov_block = _skill_view_governance_block(name)
+        if _gov_block is not None:
+            return _gov_block
+
         local_category_name: str | None = None
         # ── Qualified name dispatch (plugin skills) ──────────────────
         # Names containing ':' are routed to the plugin skill registry.

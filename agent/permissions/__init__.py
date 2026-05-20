@@ -33,6 +33,17 @@ from .policy import (
     capability_matches,
     load_policy,
 )
+from .skill_governance import (
+    SkillGovernance,
+    SkillState,
+    action_capability,
+    compute_content_hash,
+    filter_usable_skills,
+    get_governance,
+    is_content_mutating,
+    reset_governance,
+    set_governance,
+)
 
 __all__ = [
     "AuditEvent",
@@ -55,4 +66,13 @@ __all__ = [
     "get_current_identity",
     "set_current_identity",
     "reset_current_identity",
+    "SkillGovernance",
+    "SkillState",
+    "action_capability",
+    "is_content_mutating",
+    "compute_content_hash",
+    "filter_usable_skills",
+    "get_governance",
+    "set_governance",
+    "reset_governance",
 ]
