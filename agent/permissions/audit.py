@@ -118,7 +118,7 @@ class AuditLog:
     ) -> None:
         self.record(AuditEvent(
             event_type="privileged_mutation",
-            decision="allow",
+            decision="",  # distinct from allow/deny decisions so the three audit filters are disjoint
             identity_id=_identity_id(identity),
             capability=action,
             resource=resource,
