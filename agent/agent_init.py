@@ -987,6 +987,21 @@ def init_agent(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                 )
+                # Bind the active identity so USER.md is per-user when
+                # enforcement is on (Epic TEA-88 / Phase 4). No-op otherwise.
+                try:
+                    from agent.permissions import get_engine
+                    _eng = get_engine()
+                    _ident = getattr(agent, "_identity", None)
+                    if _ident is not None:
+                        agent._memory_store.bind_context(
+                            identity_id=_ident.id,
+                            chat_id=agent._chat_id,
+                            enabled=_eng.policy.enabled,
+                            is_owner=(_ident.id == _eng.policy.owner_id),
+                        )
+                except Exception:
+                    pass
                 agent._memory_store.load_from_disk()
         except Exception:
             pass  # Memory is optional -- don't break agent init

@@ -33,6 +33,15 @@ from .policy import (
     capability_matches,
     load_policy,
 )
+from .memory_paths import (
+    can_read_profile,
+    can_write_profile,
+    chat_md_path,
+    global_memory_path,
+    legacy_user_path,
+    sanitize_component,
+    user_md_path,
+)
 from .skill_governance import (
     SkillGovernance,
     SkillState,
@@ -75,4 +84,11 @@ __all__ = [
     "get_governance",
     "set_governance",
     "reset_governance",
+    "user_md_path",
+    "global_memory_path",
+    "legacy_user_path",
+    "chat_md_path",
+    "sanitize_component",
+    "can_read_profile",
+    "can_write_profile",
 ]
