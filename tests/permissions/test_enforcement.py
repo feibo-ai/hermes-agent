@@ -42,11 +42,13 @@ def _defs(*names):
 def test_member_cannot_see_admin_only_tool_schema():
     eng = _engine()
     member = _ident("tg:member", "member")
-    defs = _defs("web_search", "read_file", "skill_manage", "terminal")
+    defs = _defs("web_search", "vision_analyze", "read_file", "skill_manage", "terminal")
     visible = {d["function"]["name"] for d in filter_tool_definitions(defs, member, eng)}
+    # genuinely safe tools stay visible
     assert "web_search" in visible
-    assert "read_file" in visible
-    # admin-only tools hidden from members
+    assert "vision_analyze" in visible
+    # host-access (filesystem) + admin tools hidden from members
+    assert "read_file" not in visible
     assert "skill_manage" not in visible
     assert "terminal" not in visible
 

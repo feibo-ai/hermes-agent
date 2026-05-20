@@ -1,8 +1,18 @@
 """Phase 4 (TEA-93) — per-user USER.md isolation through the real MemoryStore."""
 
+import json
+
 import pytest
 
-from tools.memory_tool import MemoryStore
+from agent.permissions import (
+    PermissionEngine,
+    load_policy,
+    reset_current_identity,
+    reset_engine,
+    set_current_identity,
+    set_engine,
+)
+from tools.memory_tool import MemoryStore, memory_tool
 
 
 @pytest.fixture
@@ -78,3 +88,65 @@ def test_chat_md_injected_when_present(mem_root):
     s = _store("telegram:A", chat_id="telegram:c1")
     block = s.format_for_system_prompt("chat")
     assert block is not None and "metric units" in block
+
+
+# --- memory write ACL (via the real memory_tool dispatcher) -----------------
+
+def _mem_engine(enabled=True):
+    return PermissionEngine(load_policy(config={"permissions": {"enabled": enabled, "users": {
+        "tg:m": {"roles": ["member"]},
+        "tg:ad": {"roles": ["admin"]},
+    }}}))
+
+
+def test_member_cannot_write_global_memory(mem_root):
+    eng = _mem_engine()
+    set_engine(eng)
+    tok = set_current_identity(eng.resolve("tg", "m"))
+    try:
+        store = _store("tg:m")
+        res = json.loads(memory_tool("add", target="memory", content="x", store=store))
+        assert res.get("success") is False
+        assert "memory.write.any" in res.get("error", "")
+    finally:
+        reset_current_identity(tok)
+        reset_engine()
+
+
+def test_member_can_write_own_user_profile(mem_root):
+    eng = _mem_engine()
+    set_engine(eng)
+    tok = set_current_identity(eng.resolve("tg", "m"))
+    try:
+        store = _store("tg:m")
+        res = json.loads(memory_tool("add", target="user", content="I like vim", store=store))
+        assert res.get("success") is True
+    finally:
+        reset_current_identity(tok)
+        reset_engine()
+
+
+def test_admin_can_write_global_memory(mem_root):
+    eng = _mem_engine()
+    set_engine(eng)
+    tok = set_current_identity(eng.resolve("tg", "ad"))
+    try:
+        store = _store("tg:ad")
+        res = json.loads(memory_tool("add", target="memory", content="global note", store=store))
+        assert res.get("success") is True
+    finally:
+        reset_current_identity(tok)
+        reset_engine()
+
+
+def test_disabled_enforcement_allows_member_global_write(mem_root):
+    eng = _mem_engine(enabled=False)
+    set_engine(eng)
+    tok = set_current_identity(eng.resolve("tg", "m"))
+    try:
+        store = _store("tg:m", enabled=False)
+        res = json.loads(memory_tool("add", target="memory", content="x", store=store))
+        assert res.get("success") is True
+    finally:
+        reset_current_identity(tok)
+        reset_engine()

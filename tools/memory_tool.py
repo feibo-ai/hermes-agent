@@ -537,6 +537,28 @@ def memory_tool(
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    # Permission gate (Epic TEA-88 / Phase 4): a member may only write their
+    # own per-user profile (target="user", memory.write.self); the shared
+    # global MEMORY.md (target="memory") is injected into every user's prompt
+    # and so requires memory.write.any. No-op when enforcement is disabled.
+    if action in {"add", "replace", "remove"}:
+        try:
+            from agent.permissions import get_current_identity, get_engine
+            eng = get_engine()
+            if eng.policy.enabled:
+                ident = get_current_identity()
+                cap = "memory.write.self" if target == "user" else "memory.write.any"
+                if not eng.can(ident, cap, resource=f"memory:{target}", audit=False):
+                    if eng.audit is not None:
+                        eng.audit.record_decision(ident, cap, "deny",
+                                                  resource=f"memory:{target}",
+                                                  reason="memory write blocked")
+                    return tool_error(
+                        f"Permission denied: writing {target} memory requires '{cap}'.",
+                        success=False)
+        except Exception:
+            pass  # fail-open: never break the memory tool on a permission error
+
     if action == "add":
         if not content:
             return tool_error("Content is required for 'add' action.", success=False)

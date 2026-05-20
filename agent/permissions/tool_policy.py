@@ -13,10 +13,23 @@ from typing import Optional
 DEFAULT_TOOL_CAPABILITY = "tool.use.safe"
 
 # Exact tool-name -> required capability.
+#
+# Host-access tools (shell, code execution, desktop control, and filesystem
+# read/write) require capabilities members do NOT hold by default — otherwise
+# a member could run arbitrary code or touch the host FS via the default
+# ``tool.use.safe`` fall-through. Genuinely safe tools (web_search, vision,
+# memory, skill view/list, etc.) intentionally fall through to tool.use.safe.
 _BUILTIN_TOOL_CAPABILITIES: dict[str, str] = {
-    # shell / process execution
+    # shell / process / code execution / desktop control
     "terminal": "tool.use.shell",
     "process": "tool.use.shell",
+    "execute_code": "tool.use.shell",
+    "computer_use": "tool.use.shell",
+    # filesystem access (read + write)
+    "write_file": "tool.use.filesystem",
+    "patch": "tool.use.filesystem",
+    "read_file": "tool.use.filesystem",
+    "search_files": "tool.use.filesystem",
     # skills: discovery/view are member-safe, management is an admin mutation
     "skills_list": "skill.view",
     "skill_view": "skill.view",
