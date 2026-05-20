@@ -910,6 +910,32 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
         return "escalate"
 
 
+def _enforce_approval_choice(choice, session_key: str = ""):
+    """Permission gate (Epic TEA-88 / Phase 2): only identities holding
+    ``tool.approve.dangerous`` may grant a *durable* (session/always)
+    approval; others are downgraded to a one-shot ``once``. No-op when
+    permission enforcement is disabled (single-user CLI default)."""
+    if choice not in ("session", "always"):
+        return choice
+    try:
+        from agent.permissions.enforcement import can_approve_dangerous
+
+        if can_approve_dangerous():
+            return choice
+        from agent.permissions import get_current_identity, get_engine
+
+        eng = get_engine()
+        if eng.audit is not None:
+            eng.audit.record_decision(
+                get_current_identity(), "tool.approve.dangerous", "deny",
+                resource="dangerous_command",
+                reason="durable approval downgraded to once",
+            )
+    except Exception:
+        return choice  # fail-open: never break the approval flow
+    return "once"
+
+
 def check_dangerous_command(command: str, env_type: str,
                             approval_callback=None) -> dict:
     """Check if a command is dangerous and handle approval.
@@ -990,6 +1016,7 @@ def check_dangerous_command(command: str, env_type: str,
 
     choice = prompt_dangerous_approval(command, description,
                                        approval_callback=approval_callback)
+    choice = _enforce_approval_choice(choice, session_key)
 
     if choice == "deny":
         return {
@@ -1298,6 +1325,7 @@ def check_all_command_guards(command: str, env_type: str,
                 choice=_outcome,
             )
 
+            choice = _enforce_approval_choice(choice, session_key)
             if not resolved or choice is None or choice == "deny":
                 reason = "timed out" if not resolved else "denied by user"
                 return {
@@ -1365,6 +1393,7 @@ def check_all_command_guards(command: str, env_type: str,
         surface="cli",
         choice=choice,
     )
+    choice = _enforce_approval_choice(choice, session_key)
 
     if choice == "deny":
         return {

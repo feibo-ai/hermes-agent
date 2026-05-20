@@ -66,6 +66,7 @@ class Policy:
     users: dict[str, list[str]] = field(default_factory=dict)  # identity_id -> [role names]
     default_role: str = "guest"
     owner_id: str = DEFAULT_OWNER_ID
+    tool_capabilities: dict[str, str] = field(default_factory=dict)  # tool name -> capability override
 
     def roles_for_identity(self, identity_id: str) -> list[str]:
         if identity_id in self.users:
@@ -116,6 +117,9 @@ def _policy_from_raw(raw: dict) -> Policy:
     }
     pol.default_role = raw.get("default_role", "guest")
     pol.owner_id = raw.get("owner_id", DEFAULT_OWNER_ID)
+    tool_caps = raw.get("tool_capabilities") or {}
+    if isinstance(tool_caps, dict):
+        pol.tool_capabilities = {str(k): str(v) for k, v in tool_caps.items()}
     return pol
 
 

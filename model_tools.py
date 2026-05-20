@@ -310,7 +310,9 @@ def get_tool_definitions(
             _last_resolved_tool_names = [t["function"]["name"] for t in cached]
             # Return a shallow copy of the list but share the dict references —
             # schemas are treated as read-only by all known callers.
-            return list(cached)
+            # Capability filtering is applied per-call (NOT cached) because the
+            # active identity varies across concurrent gateway users.
+            return _filter_tool_defs_by_identity(list(cached))
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
     if quiet_mode:
@@ -322,8 +324,22 @@ def get_tool_definitions(
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
         _tool_defs_cache[cache_key] = result
-        return list(result)
-    return result
+        return _filter_tool_defs_by_identity(list(result))
+    return _filter_tool_defs_by_identity(result)
+
+
+def _filter_tool_defs_by_identity(defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Hide tool schemas the active identity isn't permitted to use.
+
+    No-op when permission enforcement is disabled (single-user default), and
+    fail-open on any unexpected error so tool exposure never silently breaks.
+    """
+    try:
+        from agent.permissions.enforcement import filter_tool_definitions
+        return filter_tool_definitions(defs)
+    except Exception as _perm_err:  # pragma: no cover - defensive
+        logger.debug("tool schema permission filter skipped: %s", _perm_err)
+        return defs
 
 
 def _compute_tool_definitions(
@@ -770,6 +786,20 @@ def handle_function_call(
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
+
+        # Permission enforcement (Epic TEA-88 / Phase 2): re-authorize the tool
+        # call before dispatch so an LLM cannot bypass UI/schema-level gating by
+        # constructing a tool call directly. No-op when enforcement is disabled
+        # (the default for single-user CLI), so existing behaviour is preserved.
+        try:
+            from agent.permissions.enforcement import check_tool_call
+
+            _perm_denied = check_tool_call(function_name)
+        except Exception as _perm_err:  # never let the permission layer break dispatch
+            logger.debug("permission check skipped: %s", _perm_err)
+            _perm_denied = None
+        if _perm_denied is not None:
+            return json.dumps({"error": str(_perm_denied)}, ensure_ascii=False)
 
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to

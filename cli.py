@@ -7829,7 +7829,19 @@ class HermesCLI:
         _base_word = cmd_lower.split()[0].lstrip("/")
         _cmd_def = _resolve_cmd(_base_word)
         canonical = _cmd_def.name if _cmd_def else _base_word
-        
+
+        # Permission gate (Epic TEA-88 / Phase 2): block privileged slash
+        # commands for identities that lack the required capability. No-op when
+        # enforcement is disabled (single-user CLI default).
+        try:
+            from agent.permissions.enforcement import check_command
+            _cmd_denied = check_command(canonical)
+        except Exception:
+            _cmd_denied = None
+        if _cmd_denied is not None:
+            _cprint(f"  {_DIM}✗ Permission denied: '/{canonical}' requires '{_cmd_denied.capability}'.{_RST}")
+            return True
+
         if canonical in {"quit", "exit"}:
             # Parse --delete flag: /exit --delete also removes the current
             # session's transcripts + SQLite history. Ported from

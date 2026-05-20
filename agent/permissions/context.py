@@ -55,10 +55,27 @@ def set_engine(engine: PermissionEngine) -> None:
     _process_engine = engine
 
 
+def _build_engine_from_live_config() -> PermissionEngine:
+    """Best-effort engine built from the running Hermes config + home.
+
+    Falls back to a disabled (permissive) engine on any error so that the
+    permission layer can never prevent the agent from starting.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        from hermes_constants import get_hermes_home
+
+        cfg = load_config_readonly()
+        home = get_hermes_home()
+        return build_engine(config=cfg, home=home)
+    except Exception:
+        return PermissionEngine(load_policy(), AuditLog())
+
+
 def get_engine() -> PermissionEngine:
     global _process_engine
     if _process_engine is None:
-        _process_engine = PermissionEngine(load_policy(), AuditLog())
+        _process_engine = _build_engine_from_live_config()
     return _process_engine
 
 
