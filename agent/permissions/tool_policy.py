@@ -28,6 +28,9 @@ _BUILTIN_TOOL_CAPABILITIES: dict[str, str] = {
     # autonomous scheduling: a member must not be able to schedule a job that
     # later runs with the agent's full tool set (privilege escalation).
     "cronjob": "tool.use.shell",
+    # delegation: spawning a sub-agent must be elevated — otherwise a member
+    # delegates a task and the child runs unrestricted (privilege escalation).
+    "delegate_task": "tool.use.shell",
     # filesystem access (read + write)
     "write_file": "tool.use.filesystem",
     "patch": "tool.use.filesystem",

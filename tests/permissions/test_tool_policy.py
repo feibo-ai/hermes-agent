@@ -27,6 +27,12 @@ def test_cron_scheduling_is_elevated():
     assert required_capability_for_tool("cronjob") == "tool.use.shell"
 
 
+def test_delegation_is_elevated():
+    # spawning a sub-agent must be elevated, else a member delegates a task and
+    # the child runs unrestricted (privilege escalation found in live testing).
+    assert required_capability_for_tool("delegate_task") == "tool.use.shell"
+
+
 def test_filesystem_tools_require_filesystem_capability():
     for t in ("write_file", "patch", "read_file", "search_files"):
         assert required_capability_for_tool(t) == "tool.use.filesystem", t
