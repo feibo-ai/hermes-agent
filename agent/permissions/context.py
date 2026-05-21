@@ -8,6 +8,8 @@ threading them through every function signature.
 from __future__ import annotations
 
 import contextvars
+import os
+import time
 from pathlib import Path
 from typing import Optional, Union
 
@@ -21,6 +23,16 @@ _current_identity: contextvars.ContextVar[Optional[Identity]] = contextvars.Cont
 )
 
 _process_engine: Optional[PermissionEngine] = None
+# True when the engine was injected via set_engine() (e.g. tests) — such an
+# engine is authoritative and is never auto-refreshed from disk.
+_engine_explicit: bool = False
+# Fingerprint of the policy inputs (permissions.yaml + config) the lazily-built
+# engine was derived from, so we can rebuild when an operator edits the policy
+# (e.g. `hermes permissions grant`) without restarting a running gateway.
+_engine_fingerprint: Optional[tuple] = None
+_engine_last_check: float = 0.0
+# Stat the policy files at most this often to bound the per-call overhead.
+_ENGINE_RECHECK_INTERVAL: float = 2.0
 
 
 def get_current_identity() -> Identity:
@@ -51,8 +63,9 @@ def build_engine(
 
 
 def set_engine(engine: PermissionEngine) -> None:
-    global _process_engine
+    global _process_engine, _engine_explicit
     _process_engine = engine
+    _engine_explicit = True
 
 
 def _build_engine_from_live_config() -> PermissionEngine:
@@ -72,13 +85,56 @@ def _build_engine_from_live_config() -> PermissionEngine:
         return PermissionEngine(load_policy(), AuditLog())
 
 
+def _stat_fp(path) -> tuple:
+    try:
+        st = os.stat(path)
+        return (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(path), 0, 0)
+
+
+def _policy_fingerprint() -> Optional[tuple]:
+    """Fingerprint the policy inputs so we can detect operator edits."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        parts = [_stat_fp(Path(get_hermes_home()) / "permissions.yaml")]
+        try:
+            from hermes_cli.config import get_config_path
+
+            parts.append(_stat_fp(get_config_path()))
+        except Exception:
+            pass
+        return tuple(parts)
+    except Exception:
+        return None
+
+
 def get_engine() -> PermissionEngine:
-    global _process_engine
+    """Return the process permission engine, rebuilding it when the policy
+    files change on disk (so role/policy edits apply to a running gateway
+    without a restart). An engine injected via set_engine() is never refreshed."""
+    global _process_engine, _engine_fingerprint, _engine_last_check
+    if _engine_explicit:
+        return _process_engine
     if _process_engine is None:
         _process_engine = _build_engine_from_live_config()
+        _engine_fingerprint = _policy_fingerprint()
+        _engine_last_check = time.monotonic()
+        return _process_engine
+    now = time.monotonic()
+    if now - _engine_last_check >= _ENGINE_RECHECK_INTERVAL:
+        _engine_last_check = now
+        fp = _policy_fingerprint()
+        if fp != _engine_fingerprint:
+            _process_engine = _build_engine_from_live_config()
+            _engine_fingerprint = fp
     return _process_engine
 
 
 def reset_engine() -> None:
-    global _process_engine
+    global _process_engine, _engine_explicit, _engine_fingerprint, _engine_last_check
     _process_engine = None
+    _engine_explicit = False
+    _engine_fingerprint = None
+    _engine_last_check = 0.0

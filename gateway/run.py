@@ -16707,6 +16707,23 @@ class GatewayRunner:
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            # Re-resolve the acting identity per turn (Epic TEA-88 hot-update):
+            # cached agents reuse a stale identity, so bind the CURRENT role —
+            # against the auto-refreshing engine — so role/policy changes apply
+            # on the next message without a new session or gateway restart.
+            _perm_identity_token = None
+            try:
+                from agent.permissions import get_engine as _get_perm_engine
+                from agent.permissions import set_current_identity as _set_perm_identity
+
+                _perm_ident = _get_perm_engine().resolve(
+                    platform=(source.platform.value if source.platform else "cli"),
+                    user_id=source.user_id,
+                    display_name=getattr(source, "user_name", "") or "",
+                )
+                _perm_identity_token = _set_perm_identity(_perm_ident)
+            except Exception:
+                _perm_identity_token = None
             try:
                 # If _prepare_inbound_message_text buffered image paths for native
                 # attachment, wrap the user turn as an OpenAI-style multimodal
@@ -16751,6 +16768,12 @@ class GatewayRunner:
                 except Exception:
                     pass
                 reset_current_session_key(_approval_session_token)
+                if _perm_identity_token is not None:
+                    try:
+                        from agent.permissions import reset_current_identity as _reset_perm_identity
+                        _reset_perm_identity(_perm_identity_token)
+                    except Exception:
+                        pass
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
