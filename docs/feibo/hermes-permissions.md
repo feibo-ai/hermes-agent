@@ -136,6 +136,44 @@ Permission decisions and privileged mutations are appended as JSON lines to
 - `--privileged` — privileged mutations (grants, approvals, skill changes,
   policy edits).
 
+## Hot updates (no restart, no new session)
+
+Role and policy changes apply to a **running gateway on the next message** —
+no restart and no `/new`:
+
+- **Engine auto-refresh** — `get_engine()` fingerprints `permissions.yaml` +
+  config (mtime/size, ~2s throttle) and rebuilds when they change, so
+  `hermes permissions grant/revoke/enable` take effect process-wide.
+- **Per-turn identity re-bind** — the gateway re-resolves the caller's identity
+  every turn, so the execution guard enforces the *current* role even for a
+  cached per-session agent. **Demotions are enforced immediately** (a removed
+  capability is denied on the next message; tool visibility also tightens that
+  turn because the schema filter runs per call).
+- **Rebuild on role change** — when a session's resolved role changes, the
+  cached agent is evicted and rebuilt next turn, so a **promotion** (e.g.
+  `member -> owner`) exposes the newly-allowed tools on the next message.
+
+Verified live on Feishu: `owner` (runs shell) -> demote to `member` (terminal
+refused, no restart) -> promote back to `owner` (terminal runs again), all in
+the same conversation.
+
+## Known limitations
+
+- **Skill index in the system prompt is frozen per session.** Tool *execution*
+  and *schema* are re-evaluated per turn, but the skill list embedded in the
+  system prompt is built once per cached agent (for prefix-cache stability). A
+  role change forces an agent rebuild (above), which refreshes it; absent a
+  rebuild it can lag until the session resets. Skill *use* itself is still
+  enforced live via the tool layer.
+- **Engine refresh is throttled (~2s)** to bound per-call `stat()` cost, so a
+  policy edit can take up to a couple of seconds to propagate.
+- **One-time prefix-cache reset on role change** for the affected session
+  (the rebuilt agent starts a fresh prompt prefix). Role changes are rare, so
+  this is an acceptable trade-off.
+- **Multi-profile in one process:** the process engine reflects the active
+  Hermes home; a single process hot-swapping `HERMES_HOME` across profiles is
+  not a supported topology (run one gateway per profile).
+
 ## Defaults summary
 
 - Enforcement: **off** until `hermes permissions enable`.
