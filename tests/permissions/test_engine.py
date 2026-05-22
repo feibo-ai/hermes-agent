@@ -74,6 +74,30 @@ def test_member_capabilities():
     assert not eng.can(member, "manage.users")
 
 
+def test_mentor_role_can_author_and_approve_skills_only():
+    # A "skill mentor": teaches/maintains skills (create/update/approve) and
+    # uses the agent like a member, but has no host tools / user admin.
+    pol = load_policy(config={"permissions": {"enabled": True, "users": {
+        "tg:mentor": {"roles": ["mentor"]},
+    }}})
+    eng = PermissionEngine(pol)
+    mentor = Identity(id="tg:mentor", roles=("mentor",))
+    # skill authoring + approval
+    for cap in ("skill.view", "skill.use", "skill.create", "skill.update", "skill.approve"):
+        assert eng.can(mentor, cap), cap
+    # member-level base so they can actually use the agent
+    assert eng.can(mentor, "tool.use.safe")
+    assert eng.can(mentor, "memory.read.self")
+    assert eng.can(mentor, "memory.write.self")
+    # but NOT host tools, destructive skill ops, other users' memory, or admin
+    assert not eng.can(mentor, "tool.use.shell")
+    assert not eng.can(mentor, "skill.delete")
+    assert not eng.can(mentor, "skill.install")
+    assert not eng.can(mentor, "memory.read.any")
+    assert not eng.can(mentor, "manage.users")
+    assert not eng.can(mentor, "manage.roles")
+
+
 def test_guest_capabilities():
     eng = _enabled_engine()
     guest = _ident("tg:guest", "guest")

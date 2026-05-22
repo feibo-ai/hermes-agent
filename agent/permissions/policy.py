@@ -41,6 +41,19 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         "memory.read.self",
         "memory.write.self",
     ],
+    # A skill mentor: a member who also teaches/maintains skills — can author
+    # (create/update) and approve skills, but has no host tools, no destructive
+    # skill ops (delete/install), and no user/role administration.
+    "mentor": [
+        "skill.view",
+        "skill.use",
+        "skill.create",
+        "skill.update",
+        "skill.approve",
+        "tool.use.safe",
+        "memory.read.self",
+        "memory.write.self",
+    ],
     "guest": [
         "skill.view",
     ],

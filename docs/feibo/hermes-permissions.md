@@ -37,6 +37,7 @@ Default roles (`agent/permissions/policy.py`, `DEFAULT_ROLES`):
 | `owner`  | `*` (everything, including `manage.users` / `manage.roles` / `manage.policy`) |
 | `admin`  | `skill.*`, `tool.use.*`, `tool.approve.dangerous`, `memory.*`, `read.audit` |
 | `member` | `skill.view`, `skill.use`, `tool.use.safe`, `memory.read.self`, `memory.write.self` |
+| `mentor` | member + `skill.create`, `skill.update`, `skill.approve` — teaches/maintains skills; no host tools, no delete/install, no user admin |
 | `guest`  | `skill.view` |
 
 Capabilities support wildcards: `*`, `skill.*`, `tool.use.*`.
