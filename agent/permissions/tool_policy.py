@@ -43,6 +43,9 @@ _BUILTIN_TOOL_CAPABILITIES: dict[str, str] = {
     "skills_list": "skill.view",
     "skill_view": "skill.view",
     "skill_manage": "skill.update",
+    # permission administration tool: owner-only (manage.roles). admin lacks
+    # manage.roles by default, so only owner can manage roles/users by chat.
+    "permissions": "manage.roles",
 }
 
 # Prefix rules, checked when there is no exact match.
