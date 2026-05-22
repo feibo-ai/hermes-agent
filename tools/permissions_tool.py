@@ -27,27 +27,33 @@ def _result(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _request_human_approval(action: str, identity: Optional[str], role: Optional[str],
-                            profile_label: str) -> str:
-    """Block for an out-of-band human approve/deny. Returns once/session/always
-    (approved) or 'deny'. Fail-closed: any error -> deny."""
-    try:
-        from tools.approval import prompt_dangerous_approval
-        from tools.terminal_tool import _get_approval_callback
+def _gateway_approval(action: str, identity: Optional[str], role: Optional[str],
+                      profile_label: str):
+    """Route the mutation through Hermes' dangerous-command approval — the EXACT
+    same fully-wired path the terminal tool uses (``check_all_command_guards``):
+    a blocking approve/deny card in the gateway that the human must resolve, or
+    the interactive callback prompt on the CLI. The synthetic ``permissions
+    grant ...`` command matches a DANGEROUS_PATTERNS rule, so the human sees a
+    clear description of the change on their device and the call blocks until
+    they approve or deny.
 
-        if action in ("grant", "revoke"):
-            prep = "to" if action == "grant" else "from"
-            human = f"{action} role '{role}' {prep} identity '{identity}'"
-        else:
-            human = f"{action} permission enforcement (global)"
-        return prompt_dangerous_approval(
-            command=f"permissions {action} {identity or ''} {role or ''} @{profile_label}".strip(),
-            description=f"PERMISSION CHANGE in profile '{profile_label}' — {human}",
-            allow_permanent=False,
-            approval_callback=_get_approval_callback(),
-        )
+    Returns one of: ("approved", "") | ("pending", message) | ("deny", message).
+    Fail-closed: any error or no channel -> ("deny", ...)."""
+    try:
+        # Reuse terminal_tool's wrapper so we inherit its thread-local approval
+        # callback wiring verbatim (set_approval_callback / _get_approval_callback).
+        from tools.terminal_tool import _check_all_guards
+
+        cmd = f"permissions {action} {identity or ''} {role or ''} @{profile_label}".strip()
+        verdict = _check_all_guards(cmd, "local") or {}
+        if verdict.get("approved"):
+            return "approved", ""
+        status = (verdict.get("status") or "").lower()
+        if verdict.get("approval_pending") or "pending" in status or "approval_required" in status:
+            return "pending", verdict.get("message") or "Approval requested — please approve or deny."
+        return "deny", verdict.get("message") or "denied by user"
     except Exception:
-        return "deny"
+        return "deny", "no approval channel available"
 
 
 def permissions_tool(
@@ -128,11 +134,21 @@ def permissions_tool(
             "grant, revoke, enable, disable.", success=False,
         )
 
-    if _request_human_approval(action, identity, role, profile_label) == "deny":
+    verdict, message = _gateway_approval(action, identity, role, profile_label)
+    if verdict == "pending":
+        # Approval card was raised out-of-band; nothing is applied yet. The human
+        # approves/denies on their device; re-running the tool after approval lands it
+        # (Hermes remembers the session approval), or a denial blocks it.
+        return _result({
+            "success": False, "approved": False, "pending": True, "profile": profile_label,
+            "message": (message or "Approval requested — the human must approve or deny this "
+                        "change on their device. It is NOT applied yet; re-run after they approve."),
+        })
+    if verdict != "approved":
         return _result({
             "success": False, "approved": False, "profile": profile_label,
-            "message": ("Change NOT applied — the human did not approve (or no approval channel "
-                        "was available). Permission changes require an explicit out-of-band "
+            "message": (message or "Change NOT applied — the human did not approve (or no approval "
+                        "channel was available). Permission changes require an explicit out-of-band "
                         "approval that you cannot grant on the user's behalf."),
         })
 

@@ -46,6 +46,16 @@ def load_global_policy(path: Optional[Union[Path, str]] = None) -> dict:
         return {}
 
 
+def _norm(name: str) -> str:
+    """Normalize a profile name the same way Hermes does (case-insensitive),
+    so a registry entry 'teamA' matches a resolved profile dir 'teama'."""
+    try:
+        from hermes_cli.profiles import normalize_profile_name
+        return normalize_profile_name(name)
+    except Exception:
+        return (name or "").strip().lower()
+
+
 def _managed_profiles(policy: dict, actor_id: str) -> List[str]:
     entry = (policy.get("super_admins") or {}).get(actor_id)
     if entry is None:
@@ -73,4 +83,7 @@ def can_manage_profile(
     scope = _managed_profiles(load_global_policy(path), actor_id)
     if not scope:
         return False
-    return "*" in scope or target_profile in scope
+    if "*" in scope:
+        return True
+    tnorm = _norm(target_profile)
+    return any(_norm(s) == tnorm for s in scope)

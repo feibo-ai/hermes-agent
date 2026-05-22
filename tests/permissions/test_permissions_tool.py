@@ -1,7 +1,10 @@
 """Owner-gated `permissions` LLM tool: out-of-band approval + capability gating.
 
-Mutations go through prompt_dangerous_approval -> the runtime approval callback.
-Tests install a fake callback to simulate the human's approve/deny.
+Mutations go through check_all_command_guards -> the runtime approval callback
+(the same path the terminal tool uses). The synthetic ``permissions grant ...``
+command matches a DANGEROUS_PATTERNS rule, so the human must approve/deny it.
+Tests run with HERMES_INTERACTIVE=1 (CLI path) and install a fake approval
+callback to simulate the human's approve/deny.
 """
 
 import json
@@ -25,6 +28,10 @@ from tools.terminal_tool import set_approval_callback
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    # check_all_command_guards only consults the approval callback on the
+    # CLI-interactive path; mark this context interactive so the fake callback
+    # below stands in for the human's approve/deny decision.
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     yield tmp_path
     set_approval_callback(None)  # reset thread-local approval callback
 
