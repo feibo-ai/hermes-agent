@@ -1,9 +1,12 @@
 """LLM-callable permission administration (Epic TEA-88).
 
 Lets an owner manage roles/users/policy *by conversation*. The tool is
-owner-gated (requires ``manage.roles`` — see tool_policy), every mutation is
-audited, and mutating actions (grant/revoke/enable/disable) require an explicit
-``confirm=true`` second call so a preview can be shown to the human first.
+owner-gated (requires ``manage.roles`` — see tool_policy) and every mutation is
+audited. Mutations are NOT applied on the LLM's say-so: each grant/revoke/
+enable/disable goes through Hermes' out-of-band approval (the same path used for
+dangerous shell commands), so the human gets an approve/deny prompt the model
+cannot fake. If no approval channel is available, the change is denied
+(fail-closed).
 """
 
 from __future__ import annotations
@@ -18,6 +21,28 @@ def _result(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _request_human_approval(action: str, identity: Optional[str], role: Optional[str]) -> str:
+    """Block for an out-of-band human approve/deny. Returns one of
+    once/session/always (approved) or 'deny'. Fail-closed: any error -> deny."""
+    try:
+        from tools.approval import prompt_dangerous_approval
+        from tools.terminal_tool import _get_approval_callback
+
+        if action in ("grant", "revoke"):
+            prep = "to" if action == "grant" else "from"
+            human = f"{action} role '{role}' {prep} identity '{identity}'"
+        else:
+            human = f"{action} permission enforcement (global)"
+        return prompt_dangerous_approval(
+            command=f"permissions {action} {identity or ''} {role or ''}".strip(),
+            description=f"PERMISSION CHANGE — {human}",
+            allow_permanent=False,
+            approval_callback=_get_approval_callback(),
+        )
+    except Exception:
+        return "deny"
+
+
 def permissions_tool(
     action: str,
     identity: Optional[str] = None,
@@ -25,7 +50,6 @@ def permissions_tool(
     decision: Optional[str] = None,
     privileged: bool = False,
     limit: Optional[int] = None,
-    confirm: bool = False,
 ) -> str:
     try:
         from agent.permissions import admin, get_current_identity, get_engine
@@ -51,50 +75,37 @@ def permissions_tool(
         events = admin.audit_list(home, decision=decision, event_type=event_type, limit=limit)
         return _result({"success": True, "events": events, "count": len(events)})
 
-    # --- mutating actions (preview unless confirm=true) --------------------
+    # --- mutating actions: require out-of-band human approval --------------
     if action in ("grant", "revoke"):
         if not identity or not role:
             return tool_error("identity and role are required for grant/revoke.", success=False)
-        if not confirm:
-            prep = "to" if action == "grant" else "from"
-            return _result({
-                "success": False,
-                "needs_confirmation": True,
-                "preview": f"About to {action} role '{role}' {prep} identity '{identity}'.",
-                "instruction": ("Show this to the human and ONLY re-call with the same "
-                                "action/identity/role plus confirm=true after they explicitly approve. "
-                                "Never set confirm=true on your own."),
-            })
-        try:
-            fn = admin.grant_role if action == "grant" else admin.revoke_role
-            res = fn(home, identity, role, actor, eng)
-            return _result({"success": True, "applied": action, **res})
-        except PermissionDenied as exc:
-            return tool_error(f"Permission denied: {exc}", success=False)
-        except Exception as exc:
-            return tool_error(f"{action} failed: {exc}", success=False)
+    elif action not in ("enable", "disable"):
+        return tool_error(
+            f"Unknown action '{action}'. Use: users, roles, policy, audit, grant, revoke, enable, disable.",
+            success=False,
+        )
 
-    if action in ("enable", "disable"):
-        if not confirm:
-            return _result({
-                "success": False,
-                "needs_confirmation": True,
-                "preview": f"About to {action} permission enforcement globally for this Hermes home.",
-                "instruction": ("Confirm with the human, then re-call with confirm=true. "
-                                "Never set confirm=true on your own."),
-            })
-        try:
+    if _request_human_approval(action, identity, role) == "deny":
+        return _result({
+            "success": False,
+            "approved": False,
+            "message": ("Change NOT applied — the human did not approve (or no approval "
+                        "channel was available). Permission changes require an explicit "
+                        "out-of-band approval that you cannot grant on the user's behalf."),
+        })
+
+    try:
+        if action == "grant":
+            res = admin.grant_role(home, identity, role, actor, eng)
+        elif action == "revoke":
+            res = admin.revoke_role(home, identity, role, actor, eng)
+        else:  # enable / disable
             res = admin.set_enabled(home, action == "enable", actor, eng)
-            return _result({"success": True, "applied": action, **res})
-        except PermissionDenied as exc:
-            return tool_error(f"Permission denied: {exc}", success=False)
-        except Exception as exc:
-            return tool_error(f"{action} failed: {exc}", success=False)
-
-    return tool_error(
-        f"Unknown action '{action}'. Use: users, roles, policy, audit, grant, revoke, enable, disable.",
-        success=False,
-    )
+        return _result({"success": True, "approved": True, "applied": action, **res})
+    except PermissionDenied as exc:
+        return tool_error(f"Permission denied: {exc}", success=False)
+    except Exception as exc:
+        return tool_error(f"{action} failed: {exc}", success=False)
 
 
 def check_permissions_tool_requirements() -> bool:
@@ -110,10 +121,10 @@ PERMISSIONS_SCHEMA: dict[str, Any] = {
         "'users' (list users+roles), 'roles' (list roles+capabilities), 'policy' "
         "(show effective policy), 'audit' (list audit events; optional decision="
         "allow|deny, privileged=true, limit). Mutating actions: 'grant'/'revoke' "
-        "(identity + role), 'enable'/'disable' (toggle enforcement). MUTATIONS "
-        "REQUIRE A TWO-STEP CONFIRMATION: first call WITHOUT confirm to get a "
-        "preview, show it to the human, and only re-call with confirm=true after "
-        "they explicitly approve. Identity ids look like 'telegram:123', "
+        "(identity + role), 'enable'/'disable' (toggle enforcement). EVERY MUTATION "
+        "triggers an out-of-band approve/deny prompt to the human and is applied "
+        "only if they approve — you cannot approve on their behalf; just call the "
+        "tool and report the result. Identity ids look like 'telegram:123', "
         "'feishu:ou_...', 'local:owner'. Roles: owner|admin|member|mentor|guest."
     ),
     "parameters": {
@@ -130,7 +141,6 @@ PERMISSIONS_SCHEMA: dict[str, Any] = {
             "decision": {"type": "string", "enum": ["allow", "deny"], "description": "audit filter: only allowed or denied decisions."},
             "privileged": {"type": "boolean", "description": "audit filter: only privileged mutations."},
             "limit": {"type": "integer", "description": "audit: max number of most-recent events."},
-            "confirm": {"type": "boolean", "description": "Set true ONLY after the human approves a previewed mutation."},
         },
         "required": ["action"],
     },
@@ -148,7 +158,6 @@ registry.register(
         decision=args.get("decision"),
         privileged=bool(args.get("privileged", False)),
         limit=args.get("limit"),
-        confirm=bool(args.get("confirm", False)),
     ),
     check_fn=check_permissions_tool_requirements,
     emoji="🔐",

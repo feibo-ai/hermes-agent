@@ -1,4 +1,8 @@
-"""Owner-gated `permissions` LLM tool: preview/confirm + capability gating."""
+"""Owner-gated `permissions` LLM tool: out-of-band approval + capability gating.
+
+Mutations go through prompt_dangerous_approval -> the runtime approval callback.
+Tests install a fake callback to simulate the human's approve/deny.
+"""
 
 import json
 
@@ -15,26 +19,39 @@ from agent.permissions import (
     set_engine,
 )
 from agent.permissions.tool_policy import required_capability_for_tool
+from tools.terminal_tool import set_approval_callback
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
     yield tmp_path
+    set_approval_callback(None)  # reset thread-local approval callback
 
 
-def _act_as(role, enabled=True):
-    pol = load_policy(config={"permissions": {"enabled": enabled, "users": {
+def _approve():
+    set_approval_callback(lambda *a, **k: "once")
+
+
+def _deny():
+    set_approval_callback(lambda *a, **k: "deny")
+
+
+def _approval_errors():
+    def _boom(*a, **k):
+        raise RuntimeError("no approval channel")
+    set_approval_callback(_boom)
+
+
+def _act_as(role):
+    pol = load_policy(config={"permissions": {"enabled": True, "users": {
         "local:owner": {"roles": ["owner"]},
         "tg:m": {"roles": ["member"]},
     }}})
     eng = PermissionEngine(pol, audit=__import__("agent.permissions", fromlist=["AuditLog"]).AuditLog())
     set_engine(eng)
-    if role == "owner":
-        tok = set_current_identity(Identity(id="local:owner", roles=("owner",)))
-    else:
-        tok = set_current_identity(Identity(id="tg:m", roles=(role,)))
-    return eng, tok
+    ident = Identity(id="local:owner", roles=("owner",)) if role == "owner" else Identity(id="tg:m", roles=(role,))
+    return eng, set_current_identity(ident)
 
 
 def _td(tok):
@@ -46,72 +63,80 @@ def test_tool_is_owner_gated_capability():
     assert required_capability_for_tool("permissions") == "manage.roles"
 
 
-def test_owner_read_actions(home):
+def test_owner_read_actions_need_no_approval(home):
     eng, tok = _act_as("owner")
     try:
-        users = json.loads(pt.permissions_tool("users"))
-        assert users["success"] is True
+        assert json.loads(pt.permissions_tool("users"))["success"] is True
         roles = json.loads(pt.permissions_tool("roles"))
         assert any(r["role"] == "mentor" for r in roles["roles"])
-        pol = json.loads(pt.permissions_tool("policy"))
-        assert pol["success"] is True
     finally:
         _td(tok)
 
 
-def test_grant_requires_confirmation(home):
+def test_grant_applies_only_after_human_approval(home):
     eng, tok = _act_as("owner")
+    _approve()
     try:
-        prev = json.loads(pt.permissions_tool("grant", identity="tg:x", role="member"))
-        assert prev["success"] is False
-        assert prev["needs_confirmation"] is True
-        # nothing written yet
-        assert not (home / "permissions.yaml").exists()
-    finally:
-        _td(tok)
-
-
-def test_grant_applies_with_confirm(home):
-    eng, tok = _act_as("owner")
-    try:
-        res = json.loads(pt.permissions_tool("grant", identity="tg:x", role="member", confirm=True))
-        assert res["success"] is True
+        res = json.loads(pt.permissions_tool("grant", identity="tg:x", role="member"))
+        assert res["success"] is True and res["approved"] is True
         assert "member" in load_policy(home=home).roles_for_identity("tg:x")
-        # mutation audited
         assert len(eng.audit.query(event_type="privileged_mutation")) >= 1
     finally:
         _td(tok)
 
 
-def test_revoke_then_confirm(home):
+def test_grant_denied_when_human_denies(home):
     eng, tok = _act_as("owner")
+    _deny()
     try:
-        pt.permissions_tool("grant", identity="tg:x", role="admin", confirm=True)
-        pt.permissions_tool("revoke", identity="tg:x", role="admin", confirm=True)
-        assert "admin" not in load_policy(home=home).roles_for_identity("tg:x")
+        res = json.loads(pt.permissions_tool("grant", identity="tg:x", role="member"))
+        assert res["success"] is False and res.get("approved") is False
+        assert not (home / "permissions.yaml").exists()  # nothing written
     finally:
         _td(tok)
 
 
-def test_non_owner_mutation_is_denied_by_admin_layer(home):
-    # Defense in depth: even if a non-owner reached the tool, admin.grant_role
-    # rejects without manage.roles.
-    eng, tok = _act_as("member")
+def test_fail_closed_when_no_approval_channel(home):
+    eng, tok = _act_as("owner")
+    _approval_errors()  # approval raises -> treated as deny
     try:
-        res = json.loads(pt.permissions_tool("grant", identity="tg:x", role="owner", confirm=True))
+        res = json.loads(pt.permissions_tool("grant", identity="tg:x", role="member"))
         assert res["success"] is False
-        assert "denied" in res.get("error", "").lower() or "permitted" in res.get("error", "").lower()
         assert not (home / "permissions.yaml").exists()
     finally:
         _td(tok)
 
 
-def test_enable_disable_need_confirm(home):
+def test_revoke_after_approval(home):
     eng, tok = _act_as("owner")
+    _approve()
     try:
-        assert json.loads(pt.permissions_tool("enable"))["needs_confirmation"] is True
-        res = json.loads(pt.permissions_tool("enable", confirm=True))
+        pt.permissions_tool("grant", identity="tg:x", role="admin")
+        pt.permissions_tool("revoke", identity="tg:x", role="admin")
+        assert "admin" not in load_policy(home=home).roles_for_identity("tg:x")
+    finally:
+        _td(tok)
+
+
+def test_enable_after_approval(home):
+    eng, tok = _act_as("owner")
+    _approve()
+    try:
+        res = json.loads(pt.permissions_tool("enable"))
         assert res["success"] is True
         assert load_policy(home=home).enabled is True
+    finally:
+        _td(tok)
+
+
+def test_non_owner_denied_by_admin_layer_even_if_approved(home):
+    # Defense in depth: even with approval, admin.grant_role rejects a
+    # non-owner actor (no manage.roles).
+    eng, tok = _act_as("member")
+    _approve()
+    try:
+        res = json.loads(pt.permissions_tool("grant", identity="tg:x", role="owner"))
+        assert res["success"] is False
+        assert not (home / "permissions.yaml").exists()
     finally:
         _td(tok)
