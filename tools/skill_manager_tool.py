@@ -707,6 +707,97 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 
 
 # =============================================================================
+# Permission + approval governance (Epic TEA-88 / Phase 3)
+# =============================================================================
+
+def _skill_resource(name: str) -> str:
+    return f"skill:{name}"
+
+
+def _skill_content_hash(name: str) -> str:
+    """sha256 of the skill's current SKILL.md ('' if missing)."""
+    try:
+        from agent.permissions import compute_content_hash
+        existing = _find_existing_skill(name)
+        if not existing:
+            return ""
+        skill_md = Path(existing["path"]) / "SKILL.md"
+        text = skill_md.read_text(encoding="utf-8") if skill_md.exists() else ""
+        return compute_content_hash(text)
+    except Exception:
+        return ""
+
+
+def _check_skill_permission(action: str, name: str):
+    """Return a tool_error JSON string when the action is not permitted, else
+    None. No-op when enforcement is disabled (single-user CLI default)."""
+    try:
+        from agent.permissions import action_capability, get_current_identity, get_engine
+        eng = get_engine()
+        if not eng.policy.enabled:
+            return None
+        ident = get_current_identity()
+        cap = action_capability(action)
+        if eng.can(ident, cap, resource=_skill_resource(name), audit=False):
+            return None
+        if eng.audit is not None:
+            eng.audit.record_decision(ident, cap, "deny", resource=_skill_resource(name),
+                                      reason="skill mutation blocked")
+        return tool_error(
+            f"Permission denied: skill action '{action}' requires capability '{cap}'.",
+            success=False)
+    except Exception:
+        return None  # fail-open: never break skill management on a permission error
+
+
+def _record_skill_governance(action: str, name: str) -> None:
+    """Run the approval lifecycle + audit after a successful mutation.
+    A content change (re)enters pending_review; deletes drop the record."""
+    try:
+        from agent.permissions import (get_current_identity, get_engine,
+                                        get_governance, is_content_mutating)
+        eng = get_engine()
+        if not eng.policy.enabled:
+            return
+        ident = get_current_identity()
+        gov = get_governance()
+        if action == "delete":
+            gov.forget(name)
+        elif is_content_mutating(action):
+            gov.record_mutation(name, _skill_content_hash(name), by=ident.id, action=action)
+        if eng.audit is not None:
+            eng.audit.record_privileged_mutation(ident, f"skill.{action}",
+                                                 resource=_skill_resource(name))
+    except Exception:
+        pass
+
+
+def _approve_skill(name: str) -> Dict[str, Any]:
+    existing = _find_existing_skill(name)
+    if not existing:
+        return {"success": False, "error": f"Skill '{name}' not found."}
+    try:
+        from agent.permissions import get_current_identity, get_governance
+        get_governance().approve(name, by=get_current_identity().id,
+                                 content_hash=_skill_content_hash(name))
+        return {"success": True, "message": f"Skill '{name}' approved and now usable."}
+    except Exception as e:
+        return {"success": False, "error": f"approve failed: {e}"}
+
+
+def _disable_skill_governance(name: str) -> Dict[str, Any]:
+    existing = _find_existing_skill(name)
+    if not existing:
+        return {"success": False, "error": f"Skill '{name}' not found."}
+    try:
+        from agent.permissions import get_current_identity, get_governance
+        get_governance().disable(name, by=get_current_identity().id)
+        return {"success": True, "message": f"Skill '{name}' disabled."}
+    except Exception as e:
+        return {"success": False, "error": f"disable failed: {e}"}
+
+
+# =============================================================================
 # Main entry point
 # =============================================================================
 
@@ -727,6 +818,11 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    # Per-action permission gate (Epic TEA-88 / Phase 3). No-op when disabled.
+    _perm_block = _check_skill_permission(action, name)
+    if _perm_block is not None:
+        return _perm_block
+
     if action == "create":
         if not content:
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)
@@ -759,8 +855,14 @@ def skill_manage(
             return tool_error("file_path is required for 'remove_file'.", success=False)
         result = _remove_file(name, file_path)
 
+    elif action == "approve":
+        result = _approve_skill(name)
+
+    elif action == "disable":
+        result = _disable_skill_governance(name)
+
     else:
-        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file, approve, disable"}
 
     if result.get("success"):
         try:
@@ -786,6 +888,9 @@ def skill_manage(
                 forget(name)
         except Exception:
             pass
+
+        # Approval lifecycle + audit for the mutation (Phase 3).
+        _record_skill_governance(action, name)
 
     return json.dumps(result, ensure_ascii=False)
 

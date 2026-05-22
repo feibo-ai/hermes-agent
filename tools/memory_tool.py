@@ -118,27 +118,52 @@ class MemoryStore:
     def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
+        self.chat_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.chat_char_limit = user_char_limit
+        # Multi-user context (Epic TEA-88 / Phase 4). Defaults preserve the
+        # legacy single-user, profile-global behaviour (USER.md shared).
+        self._identity_id: Optional[str] = None
+        self._chat_id: Optional[str] = None
+        self._perm_enabled: bool = False
+        self._is_owner: bool = False
         # Frozen snapshot for system prompt -- set once at load_from_disk()
-        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": "", "chat": ""}
+
+    def bind_context(self, identity_id: Optional[str] = None, chat_id: Optional[str] = None,
+                     enabled: bool = False, is_owner: bool = False) -> None:
+        """Bind the active identity + chat so USER.md becomes per-user and
+        CHAT.md per-chat. With ``enabled=False`` the legacy shared files are
+        used unchanged."""
+        self._identity_id = identity_id
+        self._chat_id = chat_id
+        self._perm_enabled = bool(enabled)
+        self._is_owner = bool(is_owner)
 
     def load_from_disk(self):
-        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
+        """Load entries from MEMORY.md, the active user's USER.md and (if any)
+        the current chat's CHAT.md, then capture the system prompt snapshot."""
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
 
-        self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
-        self.user_entries = self._read_file(mem_dir / "USER.md")
+        self.memory_entries = self._read_file(self._path_for("memory"))
+        self.user_entries = self._read_file(self._user_read_path())
+        chat_path = self._path_for("chat")
+        self.chat_entries = (
+            self._read_file(chat_path) if chat_path and chat_path.exists() else []
+        )
 
         # Deduplicate entries (preserves order, keeps first occurrence)
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
         self.user_entries = list(dict.fromkeys(self.user_entries))
+        self.chat_entries = list(dict.fromkeys(self.chat_entries))
 
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", self.memory_entries),
             "user": self._render_block("user", self.user_entries),
+            "chat": self._render_block("chat", self.chat_entries),
         }
 
     @staticmethod
@@ -178,35 +203,63 @@ class MemoryStore:
                     pass
             fd.close()
 
-    @staticmethod
-    def _path_for(target: str) -> Path:
-        mem_dir = get_memory_dir()
+    def _path_for(self, target: str):
+        """Resolve the file backing a target. USER.md is per-identity and
+        CHAT.md per-chat when enforcement is on; MEMORY.md is always global.
+        Returns None for ``chat`` when there is no bound chat id."""
+        from agent.permissions.memory_paths import (
+            chat_md_path,
+            global_memory_path,
+            user_md_path,
+        )
+        mem_root = get_memory_dir()
         if target == "user":
-            return mem_dir / "USER.md"
-        return mem_dir / "MEMORY.md"
+            return user_md_path(mem_root, self._identity_id, self._perm_enabled)
+        if target == "chat":
+            return chat_md_path(mem_root, self._chat_id)
+        return global_memory_path(mem_root)
+
+    def _user_read_path(self) -> Path:
+        """USER.md read path with owner backward-compat: when enforcement is on
+        and the owner has no per-user file yet, fall back to the legacy shared
+        USER.md so an existing single-user profile keeps showing until migrated."""
+        p = self._path_for("user")
+        if p.exists():
+            return p
+        if self._perm_enabled and self._is_owner:
+            legacy = get_memory_dir() / "USER.md"
+            if legacy.exists():
+                return legacy
+        return p
 
     def _reload_target(self, target: str):
         """Re-read entries from disk into in-memory state.
 
         Called under file lock to get the latest state before mutating.
         """
-        fresh = self._read_file(self._path_for(target))
+        path = self._user_read_path() if target == "user" else self._path_for(target)
+        fresh = self._read_file(path)
         fresh = list(dict.fromkeys(fresh))  # deduplicate
         self._set_entries(target, fresh)
 
     def save_to_disk(self, target: str):
         """Persist entries to the appropriate file. Called after every mutation."""
-        get_memory_dir().mkdir(parents=True, exist_ok=True)
-        self._write_file(self._path_for(target), self._entries_for(target))
+        path = self._path_for(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_file(path, self._entries_for(target))
 
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":
             return self.user_entries
+        if target == "chat":
+            return self.chat_entries
         return self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
         if target == "user":
             self.user_entries = entries
+        elif target == "chat":
+            self.chat_entries = entries
         else:
             self.memory_entries = entries
 
@@ -219,6 +272,8 @@ class MemoryStore:
     def _char_limit(self, target: str) -> int:
         if target == "user":
             return self.user_char_limit
+        if target == "chat":
+            return self.chat_char_limit
         return self.memory_char_limit
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
@@ -402,6 +457,8 @@ class MemoryStore:
 
         if target == "user":
             header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+        elif target == "chat":
+            header = f"CHAT CONTEXT (notes for this conversation) [{pct}% — {current:,}/{limit:,} chars]"
         else:
             header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
 
@@ -479,6 +536,28 @@ def memory_tool(
 
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
+
+    # Permission gate (Epic TEA-88 / Phase 4): a member may only write their
+    # own per-user profile (target="user", memory.write.self); the shared
+    # global MEMORY.md (target="memory") is injected into every user's prompt
+    # and so requires memory.write.any. No-op when enforcement is disabled.
+    if action in {"add", "replace", "remove"}:
+        try:
+            from agent.permissions import get_current_identity, get_engine
+            eng = get_engine()
+            if eng.policy.enabled:
+                ident = get_current_identity()
+                cap = "memory.write.self" if target == "user" else "memory.write.any"
+                if not eng.can(ident, cap, resource=f"memory:{target}", audit=False):
+                    if eng.audit is not None:
+                        eng.audit.record_decision(ident, cap, "deny",
+                                                  resource=f"memory:{target}",
+                                                  reason="memory write blocked")
+                    return tool_error(
+                        f"Permission denied: writing {target} memory requires '{cap}'.",
+                        success=False)
+        except Exception:
+            pass  # fail-open: never break the memory tool on a permission error
 
     if action == "add":
         if not content:

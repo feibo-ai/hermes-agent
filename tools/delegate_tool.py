@@ -1121,6 +1121,10 @@ def _build_child_agent(
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
+        # Inherit the delegator's identity so the sub-agent runs with the SAME
+        # permissions, never escalating to the default local owner (TEA-88).
+        user_id=getattr(parent_agent, "_user_id", None),
+        user_name=getattr(parent_agent, "_user_name", None),
         skip_context_files=True,
         skip_memory=True,
         clarify_callback=None,

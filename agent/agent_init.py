@@ -206,6 +206,20 @@ def init_agent(
     agent._chat_type = chat_type
     agent._thread_id = thread_id
     agent._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+    # Permission identity (Epic TEA-88 / Phase 2): resolve the acting identity
+    # from platform/user context and expose it to the tool-execution layer via
+    # a contextvar. Best-effort + no behavioural change when enforcement is off.
+    try:
+        from agent.permissions import get_engine, set_current_identity
+
+        agent._identity = get_engine().resolve(
+            platform=platform or "cli",
+            user_id=user_id,
+            display_name=user_name or "",
+        )
+        set_current_identity(agent._identity)
+    except Exception:
+        agent._identity = None
     # Pluggable print function — CLI replaces this with _cprint so that
     # raw ANSI status lines are routed through prompt_toolkit's renderer
     # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -973,6 +987,21 @@ def init_agent(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                 )
+                # Bind the active identity so USER.md is per-user when
+                # enforcement is on (Epic TEA-88 / Phase 4). No-op otherwise.
+                try:
+                    from agent.permissions import get_engine
+                    _eng = get_engine()
+                    _ident = getattr(agent, "_identity", None)
+                    if _ident is not None:
+                        agent._memory_store.bind_context(
+                            identity_id=_ident.id,
+                            chat_id=agent._chat_id,
+                            enabled=_eng.policy.enabled,
+                            is_owner=(_ident.id == _eng.policy.owner_id),
+                        )
+                except Exception:
+                    pass
                 agent._memory_store.load_from_disk()
         except Exception:
             pass  # Memory is optional -- don't break agent init

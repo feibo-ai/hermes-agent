@@ -10296,7 +10296,8 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory",
-        "model", "pairing", "plugins", "postinstall", "profile", "proxy",
+        "model", "pairing", "permissions", "audit", "plugins", "postinstall",
+        "profile", "proxy",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat",
@@ -11941,9 +11942,24 @@ Examples:
         default="all",
         help="Which store to reset: 'all' (default), 'memory', or 'user'",
     )
+    _migrate_parser = memory_sub.add_parser(
+        "migrate-user-profile",
+        help="Migrate the legacy single-user USER.md into the owner's per-user profile",
+    )
+    _migrate_parser.add_argument(
+        "--owner-id",
+        dest="owner_id",
+        default="local:owner",
+        help="Owner identity id to migrate the legacy USER.md into (default: local:owner)",
+    )
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)
+        if sub == "migrate-user-profile":
+            from hermes_cli.permissions_cli import migrate_user_profile_command
+
+            migrate_user_profile_command(args)
+            return
         if sub == "off":
             from hermes_cli.config import load_config, save_config
 
@@ -12005,6 +12021,61 @@ Examples:
             memory_command(args)
 
     memory_parser.set_defaults(func=cmd_memory)
+
+    # =========================================================================
+    # permissions command (Epic TEA-88 / Phase 5)
+    # =========================================================================
+    permissions_parser = subparsers.add_parser(
+        "permissions",
+        help="Manage multi-user permissions: roles, users, policy, enforcement",
+        description=(
+            "Inspect and manage the Hermes permission system (RBAC).\n"
+            "Role/user mutations are owner-only and written to\n"
+            "~/.hermes/permissions.yaml. All privileged changes are audited."
+        ),
+    )
+    permissions_sub = permissions_parser.add_subparsers(dest="permissions_command")
+    _pu = permissions_sub.add_parser("users", help="List configured users and their roles")
+    _pu.add_argument("action", nargs="?", default="list", help=argparse.SUPPRESS)
+    _pr = permissions_sub.add_parser("roles", help="List roles and their capabilities")
+    _pr.add_argument("action", nargs="?", default="list", help=argparse.SUPPRESS)
+    _pp = permissions_sub.add_parser("policy", help="Show the effective permission policy")
+    _pp.add_argument("action", nargs="?", default="show", help=argparse.SUPPRESS)
+    _pg = permissions_sub.add_parser("grant", help="Grant a role to an identity (owner only)")
+    _pg.add_argument("identity", help="Identity id, e.g. telegram:123 or local:owner")
+    _pg.add_argument("role", help="Role name: owner|admin|member|guest|<custom>")
+    _pv = permissions_sub.add_parser("revoke", help="Revoke a role from an identity (owner only)")
+    _pv.add_argument("identity")
+    _pv.add_argument("role")
+    permissions_sub.add_parser("enable", help="Enable permission enforcement (owner only)")
+    permissions_sub.add_parser("disable", help="Disable permission enforcement (owner only)")
+
+    def cmd_permissions(args):
+        from hermes_cli.permissions_cli import permissions_command
+        permissions_command(args)
+
+    permissions_parser.set_defaults(func=cmd_permissions)
+
+    # =========================================================================
+    # audit command (Epic TEA-88 / Phase 5)
+    # =========================================================================
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="View the permission audit log",
+        description="Show permission decisions and privileged mutations from the audit log.",
+    )
+    audit_sub = audit_parser.add_subparsers(dest="audit_command")
+    _al = audit_sub.add_parser("list", help="List audit events (filterable)")
+    _al.add_argument("--decision", choices=["allow", "deny"], default=None,
+                     help="Only show allowed or denied decisions")
+    _al.add_argument("--privileged", action="store_true", help="Only show privileged mutations")
+    _al.add_argument("--limit", type=int, default=None, help="Show only the most recent N events")
+
+    def cmd_audit(args):
+        from hermes_cli.permissions_cli import audit_command
+        audit_command(args)
+
+    audit_parser.set_defaults(func=cmd_audit)
 
     # =========================================================================
     # tools command

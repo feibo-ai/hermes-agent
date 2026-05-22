@@ -16260,23 +16260,59 @@ class GatewayRunner:
                 combined_ephemeral,
                 cache_keys=self._extract_cache_busting_config(user_config),
             )
+            # Resolve the caller's current permission identity so we can detect a
+            # hot role change (TEA-88). Tool *visibility* is baked into the agent
+            # at build time, so a promotion (e.g. member->owner) needs a rebuild
+            # to expose newly-allowed tools; enforcement alone (per-turn guard)
+            # only covers the deny direction.
+            _cur_perm_ident = None
+            try:
+                from agent.permissions import get_engine as _gpe
+                _cur_perm_ident = _gpe().resolve(
+                    platform=(source.platform.value if source.platform else "cli"),
+                    user_id=source.user_id,
+                )
+            except Exception:
+                _cur_perm_ident = None
+
             agent = None
+            _stale_role_agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
             _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     cached = _cache.get(session_key)
                     if cached and cached[1] == _sig:
-                        agent = cached[0]
-                        # Refresh LRU order so the cap enforcement evicts
-                        # truly-oldest entries, not the one we just used.
-                        if hasattr(_cache, "move_to_end"):
-                            try:
-                                _cache.move_to_end(session_key)
-                            except KeyError:
-                                pass
-                        self._init_cached_agent_for_turn(agent, _interrupt_depth)
-                        logger.debug("Reusing cached agent for session %s", session_key)
+                        _candidate = cached[0]
+                        _prev_ident = getattr(_candidate, "_identity", None)
+                        _role_changed = _cur_perm_ident is not None and (
+                            _prev_ident is None
+                            or _prev_ident.id != _cur_perm_ident.id
+                            or tuple(_prev_ident.roles) != tuple(_cur_perm_ident.roles)
+                        )
+                        if _role_changed:
+                            # Rebuild below with the new role (see _stale handling).
+                            _stale_role_agent = _candidate
+                        else:
+                            agent = _candidate
+                            # Refresh LRU order so the cap enforcement evicts
+                            # truly-oldest entries, not the one we just used.
+                            if hasattr(_cache, "move_to_end"):
+                                try:
+                                    _cache.move_to_end(session_key)
+                                except KeyError:
+                                    pass
+                            self._init_cached_agent_for_turn(agent, _interrupt_depth)
+                            logger.debug("Reusing cached agent for session %s", session_key)
+            if _stale_role_agent is not None:
+                logger.info(
+                    "Permission role changed for session %s — rebuilding agent", session_key
+                )
+                try:
+                    self._cleanup_agent_resources(_stale_role_agent)
+                except Exception:
+                    pass
+                self._evict_cached_agent(session_key)
 
             if agent is None:
                 # Config changed or first message — create fresh agent
@@ -16707,6 +16743,23 @@ class GatewayRunner:
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            # Re-resolve the acting identity per turn (Epic TEA-88 hot-update):
+            # cached agents reuse a stale identity, so bind the CURRENT role —
+            # against the auto-refreshing engine — so role/policy changes apply
+            # on the next message without a new session or gateway restart.
+            _perm_identity_token = None
+            try:
+                from agent.permissions import get_engine as _get_perm_engine
+                from agent.permissions import set_current_identity as _set_perm_identity
+
+                _perm_ident = _get_perm_engine().resolve(
+                    platform=(source.platform.value if source.platform else "cli"),
+                    user_id=source.user_id,
+                    display_name=getattr(source, "user_name", "") or "",
+                )
+                _perm_identity_token = _set_perm_identity(_perm_ident)
+            except Exception:
+                _perm_identity_token = None
             try:
                 # If _prepare_inbound_message_text buffered image paths for native
                 # attachment, wrap the user turn as an OpenAI-style multimodal
@@ -16751,6 +16804,12 @@ class GatewayRunner:
                 except Exception:
                     pass
                 reset_current_session_key(_approval_session_token)
+                if _perm_identity_token is not None:
+                    try:
+                        from agent.permissions import reset_current_identity as _reset_perm_identity
+                        _reset_perm_identity(_perm_identity_token)
+                    except Exception:
+                        pass
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
