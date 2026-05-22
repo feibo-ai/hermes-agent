@@ -314,6 +314,12 @@ def _sudo_stdin_block_result(description: str) -> dict:
 # =========================================================================
 
 DANGEROUS_PATTERNS = [
+    # Hermes permission administration via the shell bypasses the gated
+    # `permissions` tool (out-of-band approval + global super-admin check). Flag
+    # it so a shell-capable agent running the CLI (incl. `HERMES_HOME=... hermes
+    # permissions grant ...`) still requires explicit human approval. (TEA-88)
+    (r'\bpermissions\s+(grant|revoke|enable|disable)\b', "modify Hermes permissions"),
+    (r'hermes_cli\b[^\n]*\bpermissions\s+(grant|revoke|enable|disable)\b', "modify Hermes permissions (module form)"),
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
     (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
