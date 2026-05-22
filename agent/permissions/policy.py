@@ -51,6 +51,9 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         "skill.update",
         "skill.approve",
         "tool.use.safe",
+        # a workspace-confined shell (runs in a sandbox limited to the agent's
+        # working directory) — distinct from full host shell (tool.use.shell)
+        "tool.use.shell.workspace",
         "memory.read.self",
         "memory.write.self",
     ],

@@ -16,6 +16,7 @@ from agent.permissions.enforcement import (
     check_tool_call,
     command_required_capability,
     filter_tool_definitions,
+    terminal_shell_mode,
 )
 
 
@@ -92,7 +93,7 @@ def test_denied_tool_call_is_audited():
     check_tool_call("terminal", member, eng)
     deny = audit.query(decision="deny")
     assert len(deny) == 1
-    assert deny[0].capability == "tool.use.shell"
+    assert deny[0].capability == "tool.use.shell.workspace"
 
 
 def test_tool_guard_noop_when_disabled():
@@ -135,3 +136,30 @@ def test_owner_allowed_privileged_command():
     eng = _engine()
     owner = _ident("local:owner", "owner")
     assert check_command("yolo", owner, eng) is None
+
+
+# --- terminal shell mode (full host vs workspace sandbox) -------------------
+
+def test_terminal_shell_mode_full_for_owner_admin():
+    eng = _engine()
+    assert terminal_shell_mode(_ident("local:owner", "owner"), eng) == "full"
+    assert terminal_shell_mode(_ident("tg:admin", "admin"), eng) == "full"
+
+
+def test_terminal_shell_mode_workspace_for_mentor():
+    pol = load_policy(config={"permissions": {"enabled": True, "users": {
+        "tg:m": {"roles": ["mentor"]},
+    }}})
+    eng = PermissionEngine(pol)
+    assert terminal_shell_mode(Identity(id="tg:m", roles=("mentor",)), eng) == "workspace"
+
+
+def test_terminal_shell_mode_none_for_member():
+    eng = _engine()
+    assert terminal_shell_mode(_ident("tg:member", "member"), eng) is None
+
+
+def test_terminal_shell_mode_full_when_disabled():
+    eng = _engine(enabled=False)
+    # no enforcement -> existing full-host behaviour preserved
+    assert terminal_shell_mode(_ident("tg:member", "member"), eng) == "full"

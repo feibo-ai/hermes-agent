@@ -77,6 +77,28 @@ def check_tool_call(
     return PermissionDenied(ident.id, cap, resource or f"tool:{tool_name}")
 
 
+def terminal_shell_mode(
+    identity: Optional[Identity] = None,
+    engine: Optional[PermissionEngine] = None,
+) -> Optional[str]:
+    """How the active identity may use the terminal:
+
+    - ``"full"``  — full host shell (has ``tool.use.shell``; or enforcement off);
+    - ``"workspace"`` — sandboxed shell confined to the workspace (has only
+      ``tool.use.shell.workspace``, e.g. the mentor role);
+    - ``None`` — no shell access (the tool gate already blocks this).
+    """
+    eng = _engine(engine)
+    if not eng.policy.enabled:
+        return "full"
+    ident = _identity(identity)
+    if eng.can(ident, "tool.use.shell", audit=False):
+        return "full"
+    if eng.can(ident, "tool.use.shell.workspace", audit=False):
+        return "workspace"
+    return None
+
+
 def can_approve_dangerous(
     identity: Optional[Identity] = None,
     engine: Optional[PermissionEngine] = None,

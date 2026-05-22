@@ -11,13 +11,16 @@ def test_default_tool_requires_safe_use():
     assert required_capability_for_tool("vision_analyze") == DEFAULT_TOOL_CAPABILITY
 
 
-def test_shell_tools_require_shell_capability():
-    assert required_capability_for_tool("terminal") == "tool.use.shell"
+def test_terminal_floor_is_workspace_shell():
+    # terminal admits full-shell holders (owner/admin via *, tool.use.*) AND
+    # scoped-shell holders (mentor via tool.use.shell.workspace). members/guests
+    # have neither. terminal_tool then sandboxes scoped-only callers.
+    assert required_capability_for_tool("terminal") == "tool.use.shell.workspace"
+
+
+def test_process_and_code_exec_stay_full_shell():
+    # process / code-exec / desktop / cron are full-shell only (not for mentor)
     assert required_capability_for_tool("process") == "tool.use.shell"
-
-
-def test_code_execution_and_desktop_require_shell_capability():
-    # would otherwise fall through to tool.use.safe and give members RCE
     assert required_capability_for_tool("execute_code") == "tool.use.shell"
     assert required_capability_for_tool("computer_use") == "tool.use.shell"
 

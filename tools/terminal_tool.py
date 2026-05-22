@@ -1094,6 +1094,38 @@ def _get_env_config() -> Dict[str, Any]:
     }
 
 
+def _apply_workspace_sandbox(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Confine a permission-scoped shell to the workspace (Epic TEA-88).
+
+    An identity holding only ``tool.use.shell.workspace`` (e.g. the mentor
+    role) is forced into a Docker sandbox: the agent's launch cwd is mounted at
+    ``/workspace`` and the shell cannot reach anything outside it. Full-shell
+    holders (owner/admin) and the single-user CLI default (enforcement off) are
+    returned unchanged. Best-effort: any error leaves config as-is.
+    """
+    try:
+        from agent.permissions.enforcement import terminal_shell_mode
+
+        if terminal_shell_mode() != "workspace":
+            return config
+        host_cwd = os.path.abspath(os.path.expanduser(
+            os.getenv("TERMINAL_CWD") or os.getcwd()
+        ))
+        scoped = dict(config)
+        scoped["env_type"] = "docker"
+        scoped["docker_mount_cwd_to_workspace"] = True
+        scoped["docker_run_as_host_user"] = True
+        scoped["host_cwd"] = host_cwd
+        scoped["cwd"] = "/workspace"
+        img = os.getenv("HERMES_WORKSPACE_SANDBOX_IMAGE")
+        if img:
+            scoped["docker_image"] = img
+        return scoped
+    except Exception as exc:
+        logger.debug("workspace-shell sandbox check skipped: %s", exc)
+        return config
+
+
 def _get_modal_backend_state(modal_mode: object | None) -> Dict[str, Any]:
     """Resolve direct vs managed Modal backend selection."""
     return resolve_modal_backend_state(
@@ -1710,8 +1742,8 @@ def terminal_tool(
                 "status": "error",
             }, ensure_ascii=False)
 
-        # Get configuration
-        config = _get_env_config()
+        # Get configuration (workspace-confined for permission-scoped shells).
+        config = _apply_workspace_sandbox(_get_env_config())
         env_type = config["env_type"]
 
         # Use task_id for environment isolation. By default all subagent
