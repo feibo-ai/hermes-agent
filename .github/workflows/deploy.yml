@@ -1,0 +1,89 @@
+# Auto-deploy the `hermes-rbac` bot to the self-hosted host 10.0.5.51 (Epic TEA-88).
+#
+# SECURITY: this job runs on a SELF-HOSTED runner on a shared production box, so
+# it triggers ONLY on push to the protected `deploy` branch (+ manual dispatch).
+# It deliberately does NOT trigger on pull_request — that would let a forked PR
+# run arbitrary code on the production host. Keep `deploy` push-protected to
+# trusted maintainers only.
+#
+# The build is fully self-contained on the runner (docker build from the repo
+# Dockerfile); no secrets are needed in CI because the bot reads all config from
+# its mounted data dir (/data/agents/hermes-rbac) on the host.
+
+name: Deploy hermes-rbac (10.0.5.51)
+
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+
+# One deploy at a time; never cancel an in-flight deploy half-way through a
+# container swap.
+concurrency:
+  group: deploy-hermes-rbac
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Pinned to the self-hosted runner on 10.0.5.51 (registered with this label).
+    runs-on: [self-hosted, hermes-51]
+    env:
+      COMPOSE_FILE: deploy/hermes-rbac/docker-compose.yml
+      DATA_DIR: /data/agents/hermes-rbac
+      IMAGE: hermes-rbac
+      CONTAINER: hermes-rbac
+    steps:
+      - name: Checkout deploy branch
+        uses: actions/checkout@v4
+
+      - name: Ensure data dir exists (config/secrets live here — never touched)
+        run: mkdir -p "$DATA_DIR"
+
+      - name: Tag current image for rollback
+        run: |
+          if docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
+            docker tag "$IMAGE:latest" "$IMAGE:previous"
+            echo "Saved previous image for rollback."
+          else
+            echo "No existing image — first deploy."
+          fi
+
+      - name: Build new image
+        run: |
+          docker compose -f "$COMPOSE_FILE" build
+          docker tag "$IMAGE:latest" "$IMAGE:${GITHUB_SHA::12}"
+          echo "Built $IMAGE:latest (tagged ${GITHUB_SHA::12})."
+
+      - name: (Re)create container
+        run: docker compose -f "$COMPOSE_FILE" up -d --force-recreate
+
+      - name: Health check — must stay running, no crash loop
+        run: |
+          sleep 12
+          status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
+          restarting=$(docker inspect -f '{{.State.Restarting}}' "$CONTAINER" 2>/dev/null || echo true)
+          echo "status=$status restarting=$restarting"
+          echo "----- recent logs -----"
+          docker logs --tail 50 "$CONTAINER" 2>&1 || true
+          echo "-----------------------"
+          if [ "$status" != "running" ] || [ "$restarting" = "true" ]; then
+            echo "::error::hermes-rbac is not healthy after deploy"; exit 1
+          fi
+          # Crash-loop guard: confirm it's still up a few seconds later.
+          sleep 5
+          if [ "$(docker inspect -f '{{.State.Status}}' "$CONTAINER")" != "running" ]; then
+            echo "::error::hermes-rbac exited shortly after start"; exit 1
+          fi
+          echo "hermes-rbac is healthy."
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          if docker image inspect "$IMAGE:previous" >/dev/null 2>&1; then
+            echo "::warning::Deploy failed — rolling back to previous image."
+            docker tag "$IMAGE:previous" "$IMAGE:latest"
+            docker compose -f "$COMPOSE_FILE" up -d --force-recreate
+            echo "Rolled back to previous image."
+          else
+            echo "::warning::Deploy failed and there is no previous image to roll back to."
+          fi
