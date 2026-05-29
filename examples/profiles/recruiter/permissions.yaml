@@ -1,0 +1,59 @@
+# Hermes permission policy for the "招聘分析师" recruiter profile.
+#
+# Drop this at:
+#     /data/agents/<profile-root>/profiles/recruiter/permissions.yaml
+#
+# Roles map (HR users → "member" via dynamic assignment by gateway).
+# Service-account identities (if Hermes ever ran any directly here) → "guest".
+#
+# See: docs/superpowers/specs/2026-05-28-requirements-mining-agent-mirahire-integration-design.md §6.2
+
+enabled: true
+default_role: guest
+
+# default_role=guest means anyone whose union_id resolves but who hasn't
+# been mapped to a role gets read-only behavior. Real HR users get
+# "member" via the identity-resolver hook (it maps MiraHire platform
+# role hr/recruiter/hiring_manager → Hermes role member).
+
+roles:
+  guest:
+    - skill.view
+  member:
+    - skill.view
+    - skill.use
+    - tool.use.safe
+    - tool.use.mirahire        # ← Allows mirahire_create_requirement
+    - memory.read.self
+    - memory.write.self
+  admin:
+    - skill.*
+    - tool.use.*
+    - tool.approve.dangerous   # mediator role for approval gates
+    - memory.*
+    - read.audit
+
+# Per-tool capability overrides. By default a tool named X gets capability
+# tool.use.X; the override below pins mirahire_create_requirement to
+# tool.use.mirahire so members of the "member" role pick it up via the
+# single capability above.
+tool_capabilities:
+  mirahire_create_requirement: tool.use.mirahire
+
+  # Lock down everything potentially destructive for the recruiter profile.
+  # These tools get capability that's NOT in the "member" role above,
+  # rendering them effectively disabled unless the user is an admin.
+  terminal: tool.use.shell
+  execute_code: tool.use.shell
+  patch: tool.use.shell
+  write_file: tool.use.shell
+  cronjob: tool.use.shell
+  delegate_task: tool.use.shell
+  browser_navigate: tool.use.shell
+  browser_click: tool.use.shell
+  browser_type: tool.use.shell
+  browser_snapshot: tool.use.shell
+
+# Users get assigned roles dynamically by gateway/hooks/mirahire_identity.py
+# at the start of each inbound message — not statically here.
+users: {}

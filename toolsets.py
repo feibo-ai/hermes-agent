@@ -156,7 +156,13 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
-    
+
+    "permissions": {
+        "description": "Owner-only multi-user permission administration: list/grant/revoke roles, show policy, view audit, toggle enforcement",
+        "tools": ["permissions"],
+        "includes": []
+    },
+
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [

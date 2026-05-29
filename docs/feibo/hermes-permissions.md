@@ -37,7 +37,7 @@ Default roles (`agent/permissions/policy.py`, `DEFAULT_ROLES`):
 | `owner`  | `*` (everything, including `manage.users` / `manage.roles` / `manage.policy`) |
 | `admin`  | `skill.*`, `tool.use.*`, `tool.approve.dangerous`, `memory.*`, `read.audit` |
 | `member` | `skill.view`, `skill.use`, `tool.use.safe`, `memory.read.self`, `memory.write.self` |
-| `mentor` | member + `skill.create`, `skill.update`, `skill.approve` — teaches/maintains skills; no host tools, no delete/install, no user admin |
+| `mentor` | member + `skill.create`, `skill.update`, `skill.approve` + `tool.use.shell.workspace` — teaches/maintains skills and gets a **workspace-confined shell**; no full host shell, no delete/install, no user admin |
 | `guest`  | `skill.view` |
 
 Capabilities support wildcards: `*`, `skill.*`, `tool.use.*`.
@@ -61,6 +61,27 @@ which role.
 - **Memory** — `USER.md` becomes per-user (`memories/users/<id>/USER.md`);
   `MEMORY.md` stays global; an optional `memories/chats/<chat-id>/CHAT.md` is
   injected for the current chat. Members read/write only their own profile.
+
+### Scoped (workspace-confined) shell
+
+There are two shell capabilities:
+
+- `tool.use.shell` — **full host shell** (owner via `*`, admin via `tool.use.*`);
+  uses the configured terminal backend (e.g. `local`).
+- `tool.use.shell.workspace` — a **sandboxed shell** confined to the agent's
+  working directory (held by `mentor`).
+
+The `terminal` tool admits either, then `terminal_tool` picks the backend by
+capability: a holder of only `tool.use.shell.workspace` is forced into a
+**Docker sandbox** with the launch cwd mounted at `/workspace`
+(`docker_mount_cwd_to_workspace`, `docker_run_as_host_user`), so the shell
+cannot read or modify anything outside the workspace. `process`, `execute_code`,
+`computer_use`, and `cronjob` remain full-shell only (not granted to mentors).
+
+Set `HERMES_WORKSPACE_SANDBOX_IMAGE` to choose the sandbox image (default: the
+configured Docker terminal image). When Hermes itself runs inside a container,
+prefer an in-container confinement (read-only rootfs + writable workspace, or a
+low-privilege user) over nested Docker.
 
 ## Policy file
 

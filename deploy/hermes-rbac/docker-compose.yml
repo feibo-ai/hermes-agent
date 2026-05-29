@@ -1,0 +1,33 @@
+# Deploy unit for the dedicated `hermes-rbac` bot on 10.0.5.51 (Epic TEA-88).
+#
+# Built and recreated by .github/workflows/deploy.yml on every push to the
+# `deploy` branch. Application code is baked INTO the image (see ../../Dockerfile);
+# only the HERMES_HOME data dir is bind-mounted, so ALL config + secrets live in
+# /data/agents/hermes-rbac on the host and survive every redeploy. The image
+# never contains secrets.
+#
+# This is a brand-new, isolated bot — it does NOT touch the existing
+# hermes-assis / hermes-kgb / hermes-assis-recruiter containers or their data.
+#
+# Manual use on the host (the workflow does this for you):
+#   docker compose -f deploy/hermes-rbac/docker-compose.yml up -d --build
+
+services:
+  hermes-rbac:
+    build:
+      # Context is the repo root so the full Dockerfile build (uv sync, npm,
+      # playwright, web/ui-tui) has everything it needs. Resolved relative to
+      # this compose file's directory => deploy/hermes-rbac/../.. = repo root.
+      context: ../..
+      dockerfile: Dockerfile
+    image: hermes-rbac:latest
+    container_name: hermes-rbac
+    restart: unless-stopped
+    # HERMES_HOME. Holds config.yaml, .env, profiles/, sessions/, audit/, skills/
+    # — i.e. every credential. Override the host path with HERMES_RBAC_DATA.
+    volumes:
+      - ${HERMES_RBAC_DATA:-/data/agents/hermes-rbac}:/opt/data
+    # Messaging platforms (Feishu/Telegram/…) are outbound (websocket / long
+    # poll), so no inbound port is published. If you later want the web
+    # dashboard, add e.g.  ports: ["8644:9119"]  and set HERMES_DASHBOARD=1.
+    command: ["gateway", "run"]

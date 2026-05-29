@@ -718,7 +718,7 @@ def _skill_content_hash(name: str) -> str:
     """sha256 of the skill's current SKILL.md ('' if missing)."""
     try:
         from agent.permissions import compute_content_hash
-        existing = _find_existing_skill(name)
+        existing = _find_skill(name)
         if not existing:
             return ""
         skill_md = Path(existing["path"]) / "SKILL.md"
@@ -773,7 +773,7 @@ def _record_skill_governance(action: str, name: str) -> None:
 
 
 def _approve_skill(name: str) -> Dict[str, Any]:
-    existing = _find_existing_skill(name)
+    existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
     try:
@@ -786,7 +786,7 @@ def _approve_skill(name: str) -> Dict[str, Any]:
 
 
 def _disable_skill_governance(name: str) -> Dict[str, Any]:
-    existing = _find_existing_skill(name)
+    existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
     try:
@@ -936,8 +936,12 @@ SKILL_MANAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
-                "description": "The action to perform."
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file", "approve", "disable"],
+                "description": (
+                    "The action to perform. 'approve' marks a skill approved "
+                    "(usable by members); 'disable' takes it out of service. "
+                    "Both require skill.approve / admin-or-mentor permission."
+                )
             },
             "name": {
                 "type": "string",

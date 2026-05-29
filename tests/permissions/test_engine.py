@@ -89,8 +89,10 @@ def test_mentor_role_can_author_and_approve_skills_only():
     assert eng.can(mentor, "tool.use.safe")
     assert eng.can(mentor, "memory.read.self")
     assert eng.can(mentor, "memory.write.self")
-    # but NOT host tools, destructive skill ops, other users' memory, or admin
+    # a workspace-confined shell (sandboxed), but NOT full host shell
+    assert eng.can(mentor, "tool.use.shell.workspace")
     assert not eng.can(mentor, "tool.use.shell")
+    # but NOT destructive skill ops, other users' memory, or admin
     assert not eng.can(mentor, "skill.delete")
     assert not eng.can(mentor, "skill.install")
     assert not eng.can(mentor, "memory.read.any")

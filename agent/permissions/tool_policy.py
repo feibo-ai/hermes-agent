@@ -21,7 +21,10 @@ DEFAULT_TOOL_CAPABILITY = "tool.use.safe"
 # memory, skill view/list, etc.) intentionally fall through to tool.use.safe.
 _BUILTIN_TOOL_CAPABILITIES: dict[str, str] = {
     # shell / process / code execution / desktop control
-    "terminal": "tool.use.shell",
+    # terminal floor is the *workspace* shell so a sandboxed mentor can use it;
+    # full-shell holders (owner via *, admin via tool.use.*) also match and get
+    # an unsandboxed backend. process/code-exec/desktop stay full-shell only.
+    "terminal": "tool.use.shell.workspace",
     "process": "tool.use.shell",
     "execute_code": "tool.use.shell",
     "computer_use": "tool.use.shell",
@@ -40,6 +43,9 @@ _BUILTIN_TOOL_CAPABILITIES: dict[str, str] = {
     "skills_list": "skill.view",
     "skill_view": "skill.view",
     "skill_manage": "skill.update",
+    # permission administration tool: owner-only (manage.roles). admin lacks
+    # manage.roles by default, so only owner can manage roles/users by chat.
+    "permissions": "manage.roles",
 }
 
 # Prefix rules, checked when there is no exact match.

@@ -40,6 +40,37 @@ def _teardown(token):
     reset_governance()
 
 
+def test_approve_skill_helper_works_on_real_skill(tmp_path, monkeypatch):
+    # Regression: _approve_skill / _skill_content_hash called a non-existent
+    # _find_existing_skill (NameError, silently swallowed in hashing). Exercise
+    # the real helper so the wiring stays intact.
+    from agent.permissions import SkillGovernance, reset_governance, set_governance
+
+    skills = tmp_path / "skills"
+    (skills / "demo").mkdir(parents=True)
+    (skills / "demo" / "SKILL.md").write_text("---\nname: demo\n---\nbody", encoding="utf-8")
+    monkeypatch.setattr("agent.skill_utils.get_all_skills_dirs", lambda: [skills])
+    gov = SkillGovernance(path=tmp_path / "g.json")
+    set_governance(gov)
+    try:
+        # content hash is computed (not "" from a swallowed NameError)
+        assert smt._skill_content_hash("demo")
+        res = smt._approve_skill("demo")
+        assert res["success"] is True
+        assert gov.state("demo").value == "approved"
+        assert gov.get("demo")["content_hash"]
+    finally:
+        reset_governance()
+
+
+def test_skill_manage_schema_exposes_approve_and_disable():
+    # the action enum the LLM sees must include the governance actions, or the
+    # model can't invoke them (regression: approve was dispatch-only).
+    actions = smt.SKILL_MANAGE_SCHEMA["parameters"]["properties"]["action"]["enum"]
+    assert "approve" in actions
+    assert "disable" in actions
+
+
 def test_member_cannot_create_skill():
     eng, token = _setup("member")
     try:
