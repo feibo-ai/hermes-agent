@@ -147,6 +147,18 @@ MIRAHIRE_CREATE_REQUIREMENT_SCHEMA = {
                     "should be inlined here at the end."
                 ),
             },
+            "approver_name": {
+                "type": "string",
+                "description": (
+                    "审批人姓名 (the HRBP / approver the HR names in "
+                    "conversation). When provided, the requirement is "
+                    "created AND submitted for approval to this person "
+                    "(status → pending_approval) in one step — no draft. "
+                    "Ask the HR '这个需求由谁审批?' before calling. The name "
+                    "is matched against tenant members; if it's ambiguous or "
+                    "not found, the tool returns an error so you can re-ask."
+                ),
+            },
         },
     },
 }
@@ -181,6 +193,49 @@ def _resolve_identity():
     if not ident.get("user_id"):
         return None
     return ident
+
+
+def _resolve_approver(client, token: str, approver_name: str) -> tuple[str | None, str]:
+    """Resolve an approver display-name to a tenant user_id via /memberships.
+
+    Returns (user_id, message). user_id is None on no/ambiguous match, with a
+    human-readable message the agent can relay to the HR. The integration role
+    can read /api/v1/memberships (tenant-scoped by the JWT), so no extra
+    endpoint is needed.
+    """
+    want = (approver_name or "").strip().lower()
+    if not want:
+        return None, "未提供审批人姓名"
+    try:
+        resp = client.get(
+            "/api/v1/memberships",
+            params={"page_size": 200},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        items = (resp.json() or {}).get("items") or []
+    except Exception as e:  # pragma: no cover — network
+        logger.exception("approver resolve: memberships fetch failed")
+        return None, f"无法读取成员列表解析审批人: {e}"
+
+    # Match on the member's user display name. Each membership item carries
+    # user_id + user_name (+ role). Prefer exact, fall back to contains.
+    def _name(it: dict) -> str:
+        return str(it.get("user_name") or it.get("name") or "").strip()
+
+    exact = [it for it in items if _name(it).lower() == want]
+    contains = [it for it in items if want and want in _name(it).lower()]
+    matches = exact or contains
+    if not matches:
+        names = ", ".join(sorted({_name(it) for it in items if _name(it)})[:20])
+        return None, f"在本租户成员里找不到审批人「{approver_name}」。现有成员: {names}"
+    if len(matches) > 1:
+        cand = ", ".join(sorted({_name(it) for it in matches})[:10])
+        return None, f"审批人「{approver_name}」不唯一，请确认是: {cand}"
+    uid = matches[0].get("user_id") or matches[0].get("id")
+    if not uid:
+        return None, "匹配到审批人但缺少 user_id"
+    return uid, _name(matches[0])
 
 
 def _handle_mirahire_create_requirement(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -258,18 +313,66 @@ def _handle_mirahire_create_requirement(arguments: dict[str, Any]) -> dict[str, 
     requirement_url = (
         f"{base}/integration/recruit/requirements?openExisting=1&id={body.get('id')}"
     )
+    rid = body.get("id")
+    status = body.get("status", "draft")
+    approver_note = ""
+
+    # If an approver was named, submit for approval right away so the
+    # requirement lands in 待审批 (pending_approval) instead of an invisible
+    # draft. Resolve the name → user_id via /memberships, then call
+    # submit-for-approval. A failure here is non-fatal: the requirement still
+    # exists as a draft; we tell the agent so it can re-ask the approver.
+    approver_name = (arguments.get("approver_name") or "").strip()
+    if approver_name and rid:
+        approver_id, who = _resolve_approver(client, token, approver_name)
+        if approver_id is None:
+            approver_note = (
+                f" 注意：需求已创建为草稿，但提交审批失败——{who}。"
+                "请向 HR 确认审批人姓名后重试（或让 HR 在平台手动提交）。"
+            )
+        else:
+            try:
+                sresp = client.post(
+                    f"/api/v1/requirements/{rid}/submit-for-approval",
+                    json={"approver_id": approver_id},
+                    headers={
+                        "X-Request-ID": f"{request_id}-submit",
+                        "Authorization": f"Bearer {token}",
+                    },
+                )
+                if sresp.status_code < 400:
+                    sbody = sresp.json()
+                    status = sbody.get("status", "pending_approval")
+                    approver_note = f" 已提交给「{who}」审批 (状态: {status})。"
+                else:
+                    approver_note = (
+                        f" 注意：需求已创建为草稿，但提交审批返回 "
+                        f"{sresp.status_code}: {(sresp.text or '')[:160]}"
+                    )
+            except Exception as e:  # pragma: no cover — network
+                logger.exception("submit-for-approval failed")
+                approver_note = f" 注意：需求已创建为草稿，但提交审批异常: {e}"
+
+    if status == "pending_approval":
+        msg = (
+            f"招聘需求已创建并提交审批 (code={body.get('code')}, 状态=待审批)。"
+            f"{approver_note} 平台查看: {requirement_url}"
+        )
+    else:
+        msg = (
+            f"招聘需求已保存 (code={body.get('code')}, 状态={status})。"
+            f"{approver_note} 平台查看: {requirement_url}"
+        )
+
     summary = {
-        "id": body.get("id"),
+        "id": rid,
         "code": body.get("code"),
         "version": body.get("version", 1),
-        "status": body.get("status", "draft"),
+        "status": status,
         "source": body.get("source", "hermes"),
         "url": requirement_url,
         "x_request_id": request_id,
-        "message": (
-            f"招聘需求已保存为草稿 (code={body.get('code')})。"
-            f"请在平台检查后提交审批: {requirement_url}"
-        ),
+        "message": msg,
     }
     return tool_result(summary)
 
