@@ -92,10 +92,18 @@ def bind_identity_for_turn(*, union_id: str | None) -> Optional[dict[str, Any]]:
     Returns the resolved identity dict (or None). Sets the contextvar so
     ``current_identity()`` returns the same value during the turn.
 
-    Caller (the Feishu platform handler) should call this once at the
-    start of each inbound user message, before agent dispatch.
+    Synchronous variant — safe to call from non-async code. For the async
+    inbound hot path (the Feishu platform handler), prefer
+    ``bind_identity_for_turn_async`` so the blocking MiraHire HTTP call
+    doesn't stall the event loop.
     """
     if not union_id:
+        _identity_var.set(None)
+        return None
+
+    # No-op fast path for deployments that don't enable the integration:
+    # avoids a wasted MiraHire call on every message.
+    if not os.environ.get("MIRAHIRE_API_TOKEN"):
         _identity_var.set(None)
         return None
 
@@ -109,6 +117,38 @@ def bind_identity_for_turn(*, union_id: str | None) -> Optional[dict[str, Any]]:
         return None
 
     # Attach the source key for cache short-circuiting.
+    resolved["_source_union_id"] = union_id
+    _identity_var.set(resolved)
+    return resolved
+
+
+async def bind_identity_for_turn_async(*, union_id: str | None) -> Optional[dict[str, Any]]:
+    """Async-safe identity binding for the inbound message hot path.
+
+    Runs the blocking MiraHire resolution in a worker thread so the
+    gateway event loop is never stalled. The contextvar is then set on
+    the calling task, so any tool invoked downstream in the same async
+    context sees it via ``current_identity()``.
+
+    No-op (sets None) when:
+      - union_id is empty (Feishu app not configured for union_id), or
+      - MIRAHIRE_API_TOKEN is unset (integration not enabled here).
+    """
+    import asyncio
+
+    if not union_id or not os.environ.get("MIRAHIRE_API_TOKEN"):
+        _identity_var.set(None)
+        return None
+
+    cached = _identity_var.get()
+    if cached and cached.get("_source_union_id") == union_id:
+        return cached
+
+    resolved = await asyncio.to_thread(_resolve_via_mirahire, union_id)
+    if resolved is None:
+        _identity_var.set(None)
+        return None
+
     resolved["_source_union_id"] = union_id
     _identity_var.set(resolved)
     return resolved

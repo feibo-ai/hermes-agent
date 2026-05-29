@@ -91,24 +91,30 @@ cp permissions.yaml /data/agents/<profile-root>/profiles/recruiter/permissions.y
 
 (Or scp from your local clone of this branch.)
 
-## 7. Wire the identity-resolver into the Feishu platform handler
+## 7. Identity-resolver wiring (already done in this branch)
 
-In `gateway/platforms/feishu.py` (or wherever the Feishu inbound message
-handler is in your deployment), at the start of each new inbound user
-message:
+The identity binding is **already wired** in
+`gateway/platforms/feishu.py::_handle_message_event_data` — right after
+admission, it calls `bind_identity_for_turn_async(union_id=...)` reading
+the sender's `union_id`. The call is a no-op unless `MIRAHIRE_API_TOKEN`
+is set, so it's safe for all deployments.
 
-```python
-from gateway.hooks.mirahire_identity import bind_identity_for_turn
+No manual patching needed. Just make sure:
+  - The Feishu app event subscription sends `user_id_type=union_id`
+    (step 1) so `sender.sender_id.union_id` is populated.
+  - `MIRAHIRE_API_TOKEN` + `MIRAHIRE_BASE_URL` are in the profile `.env`
+    (step 5).
 
-bind_identity_for_turn(union_id=event.sender.sender_id.union_id)
-```
+The binding uses `asyncio.to_thread` for the MiraHire HTTP call so it
+never stalls the gateway event loop, and sets a contextvar that the
+`mirahire_create_requirement` tool reads via `current_identity()`.
 
-(Adjust attribute path to match the Feishu event SDK version in use.)
-
-If you'd rather not patch the platform handler, an alternative is to
-register a hermes hook for `agent:start` and call
-`bind_identity_for_turn` there, reading `union_id` from the event
-context that hermes provides.
+**Runtime-validation note:** the contextvar propagates to tools that run
+in the same async task. If a future Hermes version dispatches tool calls
+in a detached executor thread, the binding may need to switch to a
+session-keyed store (mirroring `tools/approval.py`'s session-key
+pattern). Verify in the smoke test (step 9) that the tool resolves the
+HR identity correctly.
 
 ## 8. Rebuild + deploy the image
 

@@ -2408,6 +2408,19 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] dropping inbound event: %s", reason)
             return
 
+        # MiraHire integration (recruiter profile): bind this turn's HR
+        # identity from the sender's Feishu union_id so the
+        # mirahire_create_requirement tool can attribute writes to the
+        # real user. No-op unless MIRAHIRE_API_TOKEN is configured.
+        try:
+            from gateway.hooks.mirahire_identity import bind_identity_for_turn_async
+
+            _sid = getattr(sender, "sender_id", None)
+            _union_id = getattr(_sid, "union_id", None) if _sid else None
+            await bind_identity_for_turn_async(union_id=_union_id)
+        except Exception:  # never let identity binding break message handling
+            logger.debug("[Feishu] MiraHire identity bind skipped", exc_info=True)
+
         chat_type = getattr(message, "chat_type", "p2p")
         await self._process_inbound_message(
             data=data,
