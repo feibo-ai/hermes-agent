@@ -61,34 +61,77 @@ This creates one User per active tenant with `is_service_account=true`
 and `TenantMembership(role="integration")`. The `--print` flag prints
 the exact `mint-service-token` command for each seeded row.
 
-## 4. Mint a long-TTL JWT per tenant
+## 4. Service-account auth — pick the mode that matches the backend
 
-For each tenant whose HR will use Hermes:
+The bot authenticates to MiraHire as a service account. There are two
+modes; the right one depends on whether the target backend runs
+`KEYCLOAK_ENABLED`.
+
+### 4a. Keycloak client_credentials (production — KEYCLOAK_ENABLED=true)
+
+The deployed integration / staging / prod backends validate tokens via
+Keycloak JWKS (RS256). Self-built HS256 tokens are rejected. So in
+production the bot authenticates as a **Keycloak service account**:
+
+1. In the realm the backend points at (e.g. `aihr-integration` at
+   `KEYCLOAK_ISSUER`), create a **confidential client** (e.g.
+   `hermes-recruiter`) with **Service Accounts enabled** (the
+   client_credentials grant). No realm-role mapping is needed — the
+   bot's `integration` role comes from its MiraHire DB membership.
+2. Copy the client's **Client ID** and **Client Secret**.
+3. Link the MiraHire bot `User.keycloak_sub` to the client's
+   service-account user `sub` so the backend's Keycloak path resolves
+   the token to the bot user (see step 4c).
+
+### 4b. Static token (local/test only — KEYCLOAK_ENABLED=false)
 
 ```bash
 python -m scripts.mint_service_token \
-    --tenant-id <tenant-uuid> \
-    --user-id   <bot-user-uuid> \
-    --ttl-days  90
+    --tenant-id <tenant-uuid> --user-id <bot-user-uuid> --ttl-days 90
 ```
 
-Save the printed token securely. You'll paste it into the Hermes profile
-env in step 5.
+Only works against a backend running with `KEYCLOAK_ENABLED=false`.
+
+### 4c. Link keycloak_sub (Keycloak mode only)
+
+Obtain the client's service-account `sub` (decode a client_credentials
+token, or read it from Keycloak admin → the client → Service Account
+Roles → the user), then:
+
+```sql
+UPDATE users SET keycloak_sub = '<sa-sub-uuid>'
+WHERE id = '<bot-user-uuid>';
+```
 
 ## 5. Profile .env on Hermes host
 
 SSH into the Hermes host (e.g. `root@10.0.5.51`) and append to
 `/data/agents/<profile-root>/profiles/recruiter/.env`:
 
+**Keycloak mode (production):**
+
 ```env
-MIRAHIRE_BASE_URL=https://interview.feibo.cn/v2
-MIRAHIRE_API_TOKEN=<paste-the-token-from-step-4>
+MIRAHIRE_BASE_URL=http://aihr2-backend-integration:8000
+MIRAHIRE_KEYCLOAK_TOKEN_URL=https://keycloak.feibo.cn/realms/aihr-integration/protocol/openid-connect/token
+MIRAHIRE_KEYCLOAK_CLIENT_ID=hermes-recruiter
+MIRAHIRE_KEYCLOAK_CLIENT_SECRET=<client-secret-from-step-4a>
 ```
 
-If you run Hermes for multiple Feishu/MiraHire tenants from the same
-profile, deploy one container instance per tenant with distinct env
-files — a single recruiter profile process binds to one
-`MIRAHIRE_API_TOKEN` at a time.
+**Static mode (local/test):**
+
+```env
+MIRAHIRE_BASE_URL=https://interview.feibo.cn/v2
+MIRAHIRE_API_TOKEN=<token-from-step-4b>
+```
+
+`MIRAHIRE_BASE_URL` should reach the backend directly — attach the
+recruiter container to the backend's docker network and use the internal
+service name (`http://aihr2-backend-integration:8000`) rather than the
+SPA-fronted public URL.
+
+One recruiter process binds to one tenant's service account. For
+multiple tenants, run one container instance per tenant with distinct
+env files.
 
 ## 6. Drop in permissions.yaml
 

@@ -39,33 +39,42 @@ logger = logging.getLogger(__name__)
 # Per-process httpx client cache, keyed off (base_url, token) so token
 # rotation just produces a fresh client lazily on next call.
 _client_lock = threading.Lock()
-_client_cache: dict[tuple[str, str], Any] = {}
+_client_cache: dict[str, Any] = {}
 
 
 def _get_client():
-    """Return a (lazily-imported) httpx client for the configured base+token."""
+    """Return a (lazily-imported) httpx client + a fresh bearer token.
+
+    The client is cached per base_url; the Authorization header is set
+    per-request (by the caller) using the returned token, so Keycloak
+    token rotation is handled without leaking stale clients.
+
+    Returns (client, token). Raises if no auth is configured.
+    """
+    from gateway.mirahire_identity import get_bearer_token  # noqa: PLC0415
+
     base = os.environ.get("MIRAHIRE_BASE_URL", "https://interview.feibo.cn/v2")
-    token = os.environ.get("MIRAHIRE_API_TOKEN", "")
+    token = get_bearer_token()
     if not token:
         raise RuntimeError(
-            "MIRAHIRE_API_TOKEN env var is unset — the recruiter profile "
-            "needs a per-tenant service-account JWT (use the MiraHire repo's "
-            "scripts/mint_service_token.py to mint one)."
+            "No MiraHire bearer token. Configure either Keycloak "
+            "client_credentials (MIRAHIRE_KEYCLOAK_TOKEN_URL + "
+            "MIRAHIRE_KEYCLOAK_CLIENT_ID + MIRAHIRE_KEYCLOAK_CLIENT_SECRET) "
+            "for KEYCLOAK_ENABLED backends, or a static MIRAHIRE_API_TOKEN "
+            "for local/test backends."
         )
 
-    key = (base, token)
     with _client_lock:
-        if key not in _client_cache:
+        if base not in _client_cache:
             # Lazy import to keep startup fast for profiles that don't load
             # this tool.
             import httpx
 
-            _client_cache[key] = httpx.Client(
+            _client_cache[base] = httpx.Client(
                 base_url=base,
-                headers={"Authorization": f"Bearer {token}"},
                 timeout=httpx.Timeout(30.0, connect=10.0),
             )
-        return _client_cache[key]
+        return _client_cache[base], token
 
 
 # ---------------------------------------------------------------------------
@@ -217,11 +226,14 @@ def _handle_mirahire_create_requirement(arguments: dict[str, Any]) -> dict[str, 
     request_id = f"hermes-recruiter-{uuid.uuid4().hex[:12]}-{int(time.time())}"
 
     try:
-        client = _get_client()
+        client, token = _get_client()
         resp = client.post(
             "/api/v1/requirements",
             json=payload,
-            headers={"X-Request-ID": request_id},
+            headers={
+                "X-Request-ID": request_id,
+                "Authorization": f"Bearer {token}",
+            },
         )
     except Exception as e:  # pragma: no cover — network failures
         logger.exception("mirahire_create_requirement: network error")
@@ -229,8 +241,8 @@ def _handle_mirahire_create_requirement(arguments: dict[str, Any]) -> dict[str, 
 
     if resp.status_code == 401:
         return tool_error(
-            "MiraHire 拒绝认证 (401)。MIRAHIRE_API_TOKEN 可能已过期；"
-            "请联系运维用 scripts/mint_service_token.py 重新签发。"
+            "MiraHire 拒绝认证 (401)。服务账号 token 可能已过期或配置有误"
+            "（Keycloak client_credentials / 静态 MIRAHIRE_API_TOKEN）。"
         )
     if resp.status_code == 403:
         return tool_error(
@@ -264,8 +276,14 @@ def _handle_mirahire_create_requirement(arguments: dict[str, Any]) -> dict[str, 
 
 def _check_mirahire() -> tuple[bool, str]:
     """Return (available, message) — used by registry to gate listing."""
-    if not os.environ.get("MIRAHIRE_API_TOKEN"):
-        return (False, "MIRAHIRE_API_TOKEN env var is not set")
+    from gateway.mirahire_identity import _integration_configured  # noqa: PLC0415
+
+    if not _integration_configured():
+        return (
+            False,
+            "MiraHire auth not configured (need Keycloak client_credentials "
+            "or static MIRAHIRE_API_TOKEN)",
+        )
     return (True, "")
 
 
@@ -279,7 +297,9 @@ registry.register(
     schema=MIRAHIRE_CREATE_REQUIREMENT_SCHEMA,
     handler=_handle_mirahire_create_requirement,
     check_fn=_check_mirahire,
-    requires_env=["MIRAHIRE_API_TOKEN"],
+    # No requires_env: auth may be Keycloak client_credentials OR a static
+    # MIRAHIRE_API_TOKEN — check_fn (_check_mirahire) does the real gating.
+    requires_env=[],
     is_async=False,
     description="Write a structured recruitment requirement to MiraHire platform",
     emoji="\U0001f4cb",  # 📋

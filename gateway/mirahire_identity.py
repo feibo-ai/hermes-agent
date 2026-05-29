@@ -27,9 +27,87 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+import threading
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Bearer-token provider
+# ---------------------------------------------------------------------------
+# The deployed MiraHire backends run KEYCLOAK_ENABLED=true and validate tokens
+# via Keycloak JWKS (RS256). So in production the bot authenticates as a
+# Keycloak *service account* via the client_credentials grant. For local /
+# test backends (KEYCLOAK_ENABLED=false) a static self-built HS256 token in
+# MIRAHIRE_API_TOKEN still works.
+#
+# Env:
+#   MIRAHIRE_KEYCLOAK_TOKEN_URL  – realm token endpoint
+#       (…/realms/<realm>/protocol/openid-connect/token)
+#   MIRAHIRE_KEYCLOAK_CLIENT_ID  – confidential client with service accounts on
+#   MIRAHIRE_KEYCLOAK_CLIENT_SECRET
+#   MIRAHIRE_API_TOKEN           – static fallback (local/test only)
+_token_lock = threading.Lock()
+_kc_token_cache: dict[str, Any] = {"token": None, "exp": 0.0}
+
+
+def _integration_configured() -> bool:
+    """True if either auth mode is configured. Cheap (env-only, no network).
+
+    Used by the per-message no-op guards so deployments without the
+    integration pay nothing.
+    """
+    if os.environ.get("MIRAHIRE_KEYCLOAK_CLIENT_ID") and os.environ.get(
+        "MIRAHIRE_KEYCLOAK_CLIENT_SECRET"
+    ):
+        return True
+    return bool(os.environ.get("MIRAHIRE_API_TOKEN"))
+
+
+def get_bearer_token() -> Optional[str]:
+    """Return a bearer token for MiraHire API calls (or None if unconfigured).
+
+    Prefers Keycloak client_credentials (cached until ~30s before expiry);
+    falls back to the static MIRAHIRE_API_TOKEN.
+    """
+    token_url = os.environ.get("MIRAHIRE_KEYCLOAK_TOKEN_URL")
+    client_id = os.environ.get("MIRAHIRE_KEYCLOAK_CLIENT_ID")
+    client_secret = os.environ.get("MIRAHIRE_KEYCLOAK_CLIENT_SECRET")
+
+    if token_url and client_id and client_secret:
+        now = time.time()
+        with _token_lock:
+            cached = _kc_token_cache.get("token")
+            if cached and now < float(_kc_token_cache.get("exp", 0.0)) - 30:
+                return cached
+            try:
+                import httpx
+
+                resp = httpx.post(
+                    token_url,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    },
+                    timeout=15.0,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                tok = body.get("access_token")
+                if not tok:
+                    logger.error("Keycloak token response missing access_token")
+                    return None
+                _kc_token_cache["token"] = tok
+                _kc_token_cache["exp"] = now + float(body.get("expires_in", 300))
+                return tok
+            except Exception:  # pragma: no cover — network/credential errors
+                logger.exception("Keycloak client_credentials token fetch failed")
+                return None
+
+    return os.environ.get("MIRAHIRE_API_TOKEN") or None
 
 
 # Contextvar carrying the resolved MiraHire identity for the current turn.
@@ -56,10 +134,12 @@ def _resolve_via_mirahire(union_id: str) -> Optional[dict[str, Any]]:
     Uses MIRAHIRE_API_TOKEN and MIRAHIRE_BASE_URL from env.
     """
     base = os.environ.get("MIRAHIRE_BASE_URL", "https://interview.feibo.cn/v2")
-    token = os.environ.get("MIRAHIRE_API_TOKEN", "")
+    token = get_bearer_token()
     if not token:
         logger.warning(
-            "MIRAHIRE_API_TOKEN unset; cannot resolve union_id=%s", union_id
+            "No MiraHire bearer token (Keycloak client_credentials nor static "
+            "MIRAHIRE_API_TOKEN configured); cannot resolve union_id=%s",
+            union_id,
         )
         return None
 
@@ -103,7 +183,7 @@ def bind_identity_for_turn(*, union_id: str | None) -> Optional[dict[str, Any]]:
 
     # No-op fast path for deployments that don't enable the integration:
     # avoids a wasted MiraHire call on every message.
-    if not os.environ.get("MIRAHIRE_API_TOKEN"):
+    if not _integration_configured():
         _identity_var.set(None)
         return None
 
@@ -132,11 +212,12 @@ async def bind_identity_for_turn_async(*, union_id: str | None) -> Optional[dict
 
     No-op (sets None) when:
       - union_id is empty (Feishu app not configured for union_id), or
-      - MIRAHIRE_API_TOKEN is unset (integration not enabled here).
+      - the integration is not configured here (no Keycloak client creds
+        and no static MIRAHIRE_API_TOKEN).
     """
     import asyncio
 
-    if not union_id or not os.environ.get("MIRAHIRE_API_TOKEN"):
+    if not union_id or not _integration_configured():
         _identity_var.set(None)
         return None
 
