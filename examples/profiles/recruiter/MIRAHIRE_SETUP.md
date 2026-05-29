@@ -13,20 +13,27 @@ on the MiraHire repo.
 
 ---
 
-## 1. Feishu app configuration (one-time)
+## 1. Feishu app configuration — NO CHANGE NEEDED (verified 2026-05-29)
 
-Log into the Feishu Open Platform: <https://open.feishu.cn>.
+The "招聘业务需求分析师" app (`cli_aa87c42bb4785bd0`) runs in
+**long-connection (websocket) mode** — confirmed in the developer
+console at 事件与回调 → 事件配置: "订阅方式 = 使用长连接接收事件".
 
-1. Open the "招聘分析师" app (`cli_aa87c42bb4785bd0` — confirm via
-   `lark-cli` or the existing `.env` on the host).
-2. Navigate to **应用功能 → 事件订阅 → 事件配置**.
-3. Change the **user_id_type** field from `open_id` to `union_id` and save.
-4. (Optional) Verify by sending the bot a message and inspecting the
-   event log: `sender.sender_id.union_id` should now be populated.
+In long-connection mode there is **no `user_id_type` console toggle** for
+events (that knob only exists for webhook-callback mode). The event
+payload's `sender.sender_id` already includes `union_id` by default for
+the developer's own apps — this is exactly why `gateway/platforms/feishu.py`
+already extracts `union_id` (see its module docstring: "Session-key
+participant isolation prefers union_id ... over open_id"). The recruiter
+bot has been receiving `union_id` all along.
 
-This change is critical — Hermes needs `union_id` to bridge to MiraHire's
-`User.feishu_union_id` (different Feishu apps issue different `open_id`s
-but share `union_id`s across the same Feishu tenant).
+**Therefore: nothing to change in the Feishu console.** Subscribed events
+(verified present): `im.message.receive_v1` + reaction/read events, all
+under 应用身份.
+
+The only runtime check worth doing once deployed: tail the agent log on
+the first inbound message and confirm the identity resolver got a
+non-empty union_id (the hook logs a warning if union_id is missing).
 
 ## 2. MiraHire backend prep (already done in MiraHire repo)
 
