@@ -2413,7 +2413,7 @@ class FeishuAdapter(BasePlatformAdapter):
         # mirahire_create_requirement tool can attribute writes to the
         # real user. No-op unless MIRAHIRE_API_TOKEN is configured.
         try:
-            from gateway.hooks.mirahire_identity import bind_identity_for_turn_async
+            from gateway.mirahire_identity import bind_identity_for_turn_async
 
             _sid = getattr(sender, "sender_id", None)
             _union_id = getattr(_sid, "union_id", None) if _sid else None

@@ -146,7 +146,7 @@ MIRAHIRE_CREATE_REQUIREMENT_SCHEMA = {
 def _resolve_identity():
     """Extract MiraHire user/tenant context from the gateway-managed ctx.
 
-    The gateway's identity-resolver hook (gateway/hooks/mirahire_identity.py)
+    The gateway's identity-resolver hook (gateway/mirahire_identity.py)
     populates ``approval._identity_local`` per-turn with a tuple of
     ``(user_id, tenant_id, display_name)``. We deliberately do NOT trust
     LLM-provided identity fields.
@@ -163,7 +163,7 @@ def _resolve_identity():
         return {"user_id": user_id, "tenant_id": tenant_id, "display_name": display_name}
 
     try:
-        from gateway.hooks import mirahire_identity  # type: ignore[import-not-found]
+        from gateway import mirahire_identity  # type: ignore[import-not-found]
         ident = mirahire_identity.current_identity()
     except (ImportError, AttributeError):
         return None
